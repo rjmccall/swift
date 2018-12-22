@@ -17,4 +17,28 @@ struct X<T> {
 func testXRead<T>(x: X<T>) -> T {
   return x[]!
 }
+
+// Don't crash dealing with T? in a non-generic context.
+// rdar://44762116
+struct WillBeConcretelyConstrained<T> {}
+extension WillBeConcretelyConstrained where T == Int {
+  subscript(key: Int) -> T? {
+    get { return nil }
+    set {}
+  }
+
+  subscript(key2 key: T) -> Int? {
+    get { return nil }
+    set {}
+  }
+}
+
+// CHECK-LABEL: sil hidden [transparent] @$s18subscript_accessor27WillBeConcretelyConstrainedVAASiRszlEySiSgSiciM
+// CHECK-SAME: $@yield_once @convention(method) (Int, @inout WillBeConcretelyConstrained<Int>) -> @yields @inout Optional<Int>
+
+// CHECK-LABEL: sil hidden [transparent] @$s18subscript_accessor27WillBeConcretelyConstrainedVAASiRszlE4key2SiSgSi_tciM
+// CHECK-SAME: $@yield_once @convention(method) (Int, @inout WillBeConcretelyConstrained<Int>) -> @yields @inout Optional<Int>
+
+
+//   Check for specialization of testXRead.
 // CHECK: $s18subscript_accessor1XVxSgycisTf4dn_n
