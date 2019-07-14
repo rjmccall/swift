@@ -16,6 +16,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "BuilderTransform.h"
 #include "ConstraintSystem.h"
 #include "CodeSynthesis.h"
 #include "CSDiagnostics.h"
@@ -287,6 +288,7 @@ namespace {
     DeclContext *dc;
     const Solution &solution;
     bool SuppressDiagnostics;
+    bool SkipClosures;
 
     /// Coerce the given tuple to another tuple type.
     ///
@@ -1788,10 +1790,12 @@ namespace {
     }
     
   public:
-    ExprRewriter(ConstraintSystem &cs, const Solution &solution,
-                 bool suppressDiagnostics)
-        : cs(cs), dc(cs.DC), solution(solution),
-          SuppressDiagnostics(suppressDiagnostics) {}
+    ExprRewriter(ConstraintSystem &cs, DeclContext *dc,
+                 const Solution &solution,
+                 bool suppressDiagnostics, bool skipClosures)
+        : cs(cs), dc(dc), solution(solution),
+          SuppressDiagnostics(suppressDiagnostics),
+          SkipClosures(skipClosures) {}
 
     ConstraintSystem &getConstraintSystem() const { return cs; }
 
@@ -7360,18 +7364,14 @@ namespace {
         auto builder =
             Rewriter.solution.builderTransformedClosures.find(closure);
         if (builder != Rewriter.solution.builderTransformedClosures.end()) {
-          auto singleExpr = builder->second.second;
-          auto returnStmt = new (tc.Context) ReturnStmt(
-             singleExpr->getStartLoc(), singleExpr, /*implicit=*/true);
-          auto braceStmt = BraceStmt::create(
-              tc.Context, returnStmt->getStartLoc(), ASTNode(returnStmt),
-              returnStmt->getEndLoc(), /*implicit=*/true);
-          closure->setBody(braceStmt, /*isSingleExpression=*/true);
-        }
+          if (builder->second.applySolution(cs, Rewriter.solution, closure,
+                                            fnType->getResult(),
+                                            Rewriter.SkipClosures))
+            return { false, nullptr };
 
         // If this is a single-expression closure, convert the expression
         // in the body to the result type of the closure.
-        if (closure->hasSingleExpressionBody()) {
+        } else if (closure->hasSingleExpressionBody()) {
           // Enter the context of the closure when type-checking the body.
           llvm::SaveAndRestore<DeclContext *> savedDC(Rewriter.dc, closure);
           Expr *body = closure->getSingleExpressionBody()->walk(*this);
@@ -7485,9 +7485,11 @@ bool ConstraintSystem::applySolutionFixes(Expr *E, const Solution &solution) {
       if (auto *closure = dyn_cast<ClosureExpr>(E)) {
         auto result = solution.builderTransformedClosures.find(closure);
         if (result != solution.builderTransformedClosures.end()) {
-          auto *transformedExpr = result->second.second;
+          auto *transformedExpr = result->second.getResultExpr();
           // Since this closure has been transformed into something
           // else let's look inside transformed expression instead.
+          // TODO: this isn't obvious how to generalize to multi-statement
+          // transforms.
           return {true, transformedExpr};
         }
       }
@@ -7565,7 +7567,20 @@ Expr *ConstraintSystem::applySolution(Solution &solution, Expr *expr,
     }
   }
 
-  ExprRewriter rewriter(*this, solution, shouldSuppressDiagnostics());
+  return applySolutionRecursive(solution, DC, expr, convertType,
+                                getContextualTypePurpose(),
+                                discardedExpr, skipClosures);
+}
+
+Expr *ConstraintSystem::applySolutionRecursive(const Solution &solution,
+                                               DeclContext *dc,
+                                               Expr *expr,
+                                               Type convertType,
+                                          ContextualTypePurpose convertPurpose,
+                                               bool discardedExpr,
+                                               bool skipClosures) {
+  ExprRewriter rewriter(*this, dc, solution, shouldSuppressDiagnostics(),
+                        skipClosures);
   ExprWalker walker(rewriter);
 
   // Apply the solution to the expression.
@@ -7599,7 +7614,7 @@ Expr *ConstraintSystem::applySolution(Solution &solution, Expr *expr,
   // expression function which got deduced to be `Never`.
   auto shouldCoerceToContextualType = [&]() {
     return convertType && !(getType(result)->isUninhabited() &&
-                            getContextualTypePurpose() == CTP_ReturnSingleExpr);
+                            convertPurpose == CTP_ReturnSingleExpr);
   };
 
   // If we're supposed to convert the expression to some particular type,
@@ -7626,7 +7641,8 @@ Expr *Solution::coerceToType(Expr *expr, Type toType,
                              bool ignoreTopLevelInjection,
                              Optional<Pattern*> typeFromPattern) const {
   auto &cs = getConstraintSystem();
-  ExprRewriter rewriter(cs, *this, /*suppressDiagnostics=*/false);
+  ExprRewriter rewriter(cs, cs.DC, *this, /*suppressDiagnostics=*/false,
+                        /*skip closures*/ true);
   Expr *result = rewriter.coerceToType(expr, toType, locator, typeFromPattern);
   if (!result)
     return nullptr;
@@ -7775,8 +7791,9 @@ Expr *TypeChecker::callWitness(Expr *base, DeclContext *dc,
   }
 
   Solution &solution = solutions.front();
-  ExprRewriter rewriter(cs, solution,
-                        /*suppressDiagnostics=*/false);
+  ExprRewriter rewriter(cs, cs.DC, solution,
+                        /*suppressDiagnostics=*/false,
+                        /*skipClosures=*/true);
 
   auto choice =
       OverloadChoice(openedFullType, witnessFn, FunctionRefKind::SingleApply);

@@ -13,6 +13,7 @@
 // This file implements the constraint solver used in the type checker.
 //
 //===----------------------------------------------------------------------===//
+#include "BuilderTransform.h"
 #include "CSStep.h"
 #include "ConstraintGraph.h"
 #include "ConstraintSystem.h"
@@ -178,14 +179,11 @@ Solution ConstraintSystem::finalize() {
 
   for (const auto &transformed : builderTransformedClosures) {
     auto known =
-        solution.builderTransformedClosures.find(std::get<0>(transformed));
+        solution.builderTransformedClosures.find(transformed.first);
     if (known != solution.builderTransformedClosures.end()) {
-      assert(known->second.second == std::get<2>(transformed));
+      assert(known->second == transformed.second);
     }
-    solution.builderTransformedClosures.insert(
-      std::make_pair(std::get<0>(transformed),
-                     std::make_pair(std::get<1>(transformed),
-                                    std::get<2>(transformed))));
+    solution.builderTransformedClosures.insert(transformed);
   }
 
   return solution;
@@ -260,10 +258,7 @@ void ConstraintSystem::applySolution(const Solution &solution) {
     CheckedConformances.push_back(conformance);
 
   for (const auto &transformed : solution.builderTransformedClosures) {
-    builderTransformedClosures.push_back(
-      std::make_tuple(transformed.first,
-                      transformed.second.first,
-                      transformed.second.second));
+    builderTransformedClosures.push_back(transformed);
   }
     
   // Register any fixes produced along this path.
@@ -1188,58 +1183,12 @@ ConstraintSystem::solveImpl(Expr *&expr,
   // Set up the expression type checker timer.
   Timer.emplace(expr, *this);
 
-  // Try to shrink the system by reducing disjunction domains. This
-  // goes through every sub-expression and generate its own sub-system, to
-  // try to reduce the domains of those subexpressions.
-  shrink(expr);
-
-  // Generate constraints for the main system.
-  if (auto generatedExpr = generateConstraints(expr))
-    expr = generatedExpr;
-  else {
-    if (listener)
-      listener->constraintGenerationFailed(expr);
-    return SolutionKind::Error;
-  }
-
-  // If there is a type that we're expected to convert to, add the conversion
-  // constraint.
-  if (convertType) {
-    auto constraintKind = ConstraintKind::Conversion;
-    
-    if ((getContextualTypePurpose() == CTP_ReturnStmt ||
-         getContextualTypePurpose() == CTP_ReturnSingleExpr ||
-         getContextualTypePurpose() == CTP_Initialization)
-        && Options.contains(ConstraintSystemFlags::UnderlyingTypeForOpaqueReturnType))
-      constraintKind = ConstraintKind::OpaqueUnderlyingType;
-    
-    if (getContextualTypePurpose() == CTP_CallArgument)
-      constraintKind = ConstraintKind::ArgumentConversion;
-
-    // In a by-reference yield, we expect the contextual type to be an
-    // l-value type, so the result must be bound to that.
-    if (getContextualTypePurpose() == CTP_YieldByReference)
-      constraintKind = ConstraintKind::Bind;
-
-    bool isForSingleExprFunction =
-        getContextualTypePurpose() == CTP_ReturnSingleExpr;
-    auto *convertTypeLocator = getConstraintLocator(
-        expr, LocatorPathElt::getContextualType(isForSingleExprFunction));
-
-    if (allowFreeTypeVariables == FreeTypeVariableBinding::UnresolvedType) {
-      convertType = convertType.transform([&](Type type) -> Type {
-        if (type->is<UnresolvedType>())
-          return createTypeVariable(convertTypeLocator, TVO_CanBindToNoEscape);
-        return type;
-      });
-    }
-
-    addConstraint(constraintKind, getType(expr), convertType,
-                  convertTypeLocator, /*isFavored*/ true);
-  }
-
-  // Notify the listener that we've built the constraint system.
-  if (listener && listener->builtConstraints(*this, expr)) {
+  bool allowOpaqueUnderlyingType =
+    Options.contains(ConstraintSystemFlags::UnderlyingTypeForOpaqueReturnType);
+  if (generateContextualConstraints(expr, convertType,
+                                    getContextualTypePurpose(),
+                                    listener, allowFreeTypeVariables,
+                                    allowOpaqueUnderlyingType)) {
     return SolutionKind::Error;
   }
 
@@ -1257,6 +1206,76 @@ ConstraintSystem::solveImpl(Expr *&expr,
   // If there are no solutions let's mark system as unsolved,
   // and solved otherwise even if there are multiple solutions still present.
   return solutions.empty() ? SolutionKind::Unsolved : SolutionKind::Solved;
+}
+
+bool ConstraintSystem::generateContextualConstraints(
+                                        Expr *&expr,
+                                        Type contextualType,
+                                        ContextualTypePurpose contextualPurpose,
+                                        ExprTypeCheckListener *listener,
+                                        FreeTypeVariableBinding
+                                            allowFreeTypeVariables,
+                                        bool allowOpaqueUnderlyingType) {
+  // Generally this routine should not consider Options or else it'll
+  // misbehave for recursive invocations.
+
+  // Try to shrink the system by reducing disjunction domains. This
+  // goes through every sub-expression and generate its own sub-system, to
+  // try to reduce the domains of those subexpressions.
+  shrink(expr);
+
+  // Generate constraints for the main system.
+  if (auto generatedExpr = generateConstraints(expr))
+    expr = generatedExpr;
+  else {
+    if (listener)
+      listener->constraintGenerationFailed(expr);
+    return true;
+  }
+
+  // If there is a type that we're expected to convert to, add the conversion
+  // constraint.
+  if (contextualType) {
+    auto constraintKind = ConstraintKind::Conversion;
+    
+    if ((contextualPurpose == CTP_ReturnStmt ||
+         contextualPurpose == CTP_ReturnSingleExpr ||
+         contextualPurpose == CTP_Initialization)
+        && allowOpaqueUnderlyingType)
+      constraintKind = ConstraintKind::OpaqueUnderlyingType;
+    
+    if (contextualPurpose == CTP_CallArgument)
+      constraintKind = ConstraintKind::ArgumentConversion;
+
+    // In a by-reference yield, we expect the contextual type to be an
+    // l-value type, so the result must be bound to that.
+    if (contextualPurpose == CTP_YieldByReference)
+      constraintKind = ConstraintKind::Bind;
+
+    bool isForSingleExprFunction =
+        contextualPurpose == CTP_ReturnSingleExpr;
+    auto *contextualTypeLocator = getConstraintLocator(
+        expr, LocatorPathElt::getContextualType(isForSingleExprFunction));
+
+    if (allowFreeTypeVariables == FreeTypeVariableBinding::UnresolvedType) {
+      contextualType = contextualType.transform([&](Type type) -> Type {
+        if (type->is<UnresolvedType>())
+          return createTypeVariable(contextualTypeLocator,
+                                    TVO_CanBindToNoEscape);
+        return type;
+      });
+    }
+
+    addConstraint(constraintKind, getType(expr), contextualType,
+                  contextualTypeLocator, /*isFavored*/ true);
+  }
+
+  // Notify the listener that we've built the constraint system.
+  if (listener && listener->builtConstraints(*this, expr)) {
+    return true;
+  }
+
+  return false;
 }
 
 bool ConstraintSystem::solve(Expr *const expr,

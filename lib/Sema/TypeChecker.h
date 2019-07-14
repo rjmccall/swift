@@ -815,6 +815,12 @@ public:
   /// translation unit has been processed.
   void finalizeDecl(ValueDecl *D);
 
+  /// Check whether we've already pre-checked the given closure and, if not,
+  /// mark that we have and return true.
+  bool flagUnprecheckedClosure(ClosureExpr *closure) {
+    return precheckedClosures.insert(closure).second;
+  }
+
   /// Resolve a reference to the given type declaration within a particular
   /// context.
   ///

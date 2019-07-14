@@ -51,6 +51,7 @@ class Expr;
 
 namespace constraints {
 
+class BuilderTransform;
 class ConstraintGraph;
 class ConstraintGraphNode;
 class ConstraintSystem;
@@ -605,15 +606,16 @@ class Solution {
 
 public:
   /// Create a solution for the given constraint system.
-  Solution(ConstraintSystem &cs, const Score &score)
-    : constraintSystem(&cs), FixedScore(score) {}
+  Solution(ConstraintSystem &cs, const Score &score);
 
   // Solution is a non-copyable type for performance reasons.
   Solution(const Solution &other) = delete;
   Solution &operator=(const Solution &other) = delete;
 
-  Solution(Solution &&other) = default;
-  Solution &operator=(Solution &&other) = default;
+  Solution(Solution &&other);
+  Solution &operator=(Solution &&other);
+
+  ~Solution();
 
   size_t getTotalMemory() const;
 
@@ -659,7 +661,7 @@ public:
       Conformances;
 
   /// The set of closures that have been transformed by a function builder.
-  llvm::MapVector<ClosureExpr *, std::pair<Type, Expr *>>
+  llvm::MapVector<ClosureExpr *, BuilderTransform>
       builderTransformedClosures;
 
   /// Simplify the given type by substituting all occurrences of
@@ -1134,7 +1136,7 @@ private:
       CheckedConformances;
 
   /// The set of closures that have been transformed by a function builder.
-  SmallVector<std::tuple<ClosureExpr *, Type, Expr *>, 4>
+  std::vector<std::pair<ClosureExpr *, BuilderTransform>>
       builderTransformedClosures;
 
 public:
@@ -2637,6 +2639,14 @@ public:
   /// \returns a possibly-sanitized expression, or null if an error occurred.
   Expr *generateConstraints(Expr *E, DeclContext *dc = nullptr);
 
+  /// Generate constraints for the given (unchecked) expression in a
+  /// specific type context.
+  bool generateContextualConstraints(Expr *&E, Type contextualType,
+                                     ContextualTypePurpose ctp,
+                                     ExprTypeCheckListener *listener,
+                             FreeTypeVariableBinding allowFreeTypeVariables,
+                                     bool allowOpaqueUnderlyingType);
+
   /// Generate constraints for binding the given pattern to the
   /// value of the given expression.
   ///
@@ -3585,6 +3595,13 @@ public:
   Expr *applySolution(Solution &solution, Expr *expr,
                       Type convertType, bool discardedExpr,
                       bool skipClosures);
+  Expr *applySolutionRecursive(const Solution &solution,
+                               DeclContext *dc,
+                               Expr *expr,
+                               Type convertType,
+                               ContextualTypePurpose convertPurpose,
+                               bool discardedExpr,
+                               bool skipClosures);
 
   /// Reorder the disjunctive clauses for a given expression to
   /// increase the likelihood that a favored constraint will be successfully

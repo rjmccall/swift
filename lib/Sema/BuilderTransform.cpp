@@ -15,6 +15,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "BuilderTransform.h"
 #include "ConstraintSystem.h"
 #include "TypeChecker.h"
 #include "swift/AST/ASTVisitor.h"
@@ -22,6 +23,7 @@
 #include "swift/AST/NameLookup.h"
 #include "swift/AST/NameLookupRequests.h"
 #include "swift/AST/ParameterList.h"
+#include "swift/AST/PrettyStackTrace.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
 #include <iterator>
@@ -115,6 +117,40 @@ public:
            "cannot handle builder type with type variables without "
            "constraint system");
     builder = builderType->getAnyNominal();
+  }
+
+  Optional<BuilderTransform> build(AnyFunctionRef fn, Type returnType) {
+    auto expr = visitBraceStmt(fn.getBody());
+    if (!wantExpr) return None;
+
+    // Pre-check the expression.
+    auto closure = cast_or_null<ClosureExpr>(fn.getAbstractClosureExpr());
+    if ((closure ? cs->TC.flagUnprecheckedClosure(closure) : true) &&
+        cs->TC.preCheckExpression(expr, fn.getAsDeclContext()))
+      return None;
+
+    // Set a contextual type if we're applying the builder to an anonymous
+    // closure.  We don't do this for declared functions because we don't
+    // want to mess with the constraint system's established context.
+    auto ctp = CTP_ReturnStmt;
+    if (!closure && returnType) {
+      cs->setContextualType(expr, TypeLoc::withoutLoc(returnType), ctp);
+    }
+
+    // We can only be binding an opaque type if this isn't a recursive
+    // application, i.e. if the function is not a closure.
+    bool allowOpaqueUnderlyingType =
+      (closure == nullptr &&
+       cs->Options.contains(
+         ConstraintSystemFlags::UnderlyingTypeForOpaqueReturnType));
+
+    if (cs->generateContextualConstraints(expr, returnType, ctp, nullptr,
+                                          FreeTypeVariableBinding::Disallow,
+                                          allowOpaqueUnderlyingType)) {
+      return None;
+    }
+
+    return BuilderTransform(expr, returnType);
   }
 
 #define CONTROL_FLOW_STMT(StmtClass)                      \
@@ -478,45 +514,60 @@ static bool hasReturnStmt(Stmt *stmt) {
 
 bool TypeChecker::typeCheckFunctionBuilderFuncBody(FuncDecl *FD,
                                                    Type builderType) {
-  // Try to build a single result expression.
-  BuilderClosureVisitor visitor(Context, nullptr,
-                                /*wantExpr=*/true, builderType);
-  Expr *returnExpr = visitor.visit(FD->getBody());
-  if (!returnExpr)
-    return true;
+  FrontendStatsTracer statsTracer(Context.Stats,
+                                  "typecheck-function-builder-func", FD);
+  PrettyStackTraceDecl stackTrace("applying function builder to", FD);
 
   // Make sure we have a usable result type for the body.
   Type returnType = AnyFunctionRef(FD).getBodyResultType();
   if (!returnType || returnType->hasError())
     return true;
 
-  TypeCheckExprOptions options = {};
-  if (auto opaque = returnType->getAs<OpaqueTypeArchetypeType>()) {
-    if (opaque->getDecl()->isOpaqueReturnTypeOfFunction(FD))
-      options |= TypeCheckExprFlags::ConvertTypeIsOpaqueReturnType;
-  }
+  // Construct a constraint system.  This largely follows typeCheckExpression.
+  ConstraintSystemOptions options = ConstraintSystemFlags::AllowFixes;
 
-  // If we are performing code-completion inside the functions body, supress
+  // If we are performing code-completion inside the functions body, suppress
   // diagnostics to workaround typechecking performance problems.
   if (Context.SourceMgr.rangeContainsCodeCompletionLoc(
           FD->getBody()->getSourceRange()))
-    options |= TypeCheckExprFlags::SuppressDiagnostics;
+    options |= ConstraintSystemFlags::SuppressDiagnostics;
 
-  // Type-check the single result expression.
-  Type returnExprType = typeCheckExpression(returnExpr, FD,
-                                            TypeLoc::withoutLoc(returnType),
-                                            CTP_ReturnStmt, options);
-  if (!returnExprType)
+  // If the return type is an opaque type, remember that.
+  if (auto opaque = returnType->getAs<OpaqueTypeArchetypeType>()) {
+    if (opaque->getDecl()->isOpaqueReturnTypeOfFunction(FD)) {
+      options |= ConstraintSystemFlags::UnderlyingTypeForOpaqueReturnType;
+    }
+  }
+
+  ConstraintSystem cs(*this, FD, options);
+
+  // Try to build a single result expression.
+  BuilderClosureVisitor visitor(Context, &cs,
+                                /*wantTransform=*/true, builderType);
+  Optional<BuilderTransform> transform = visitor.build(FD, returnType);
+  if (!transform)
     return true;
-  assert(returnExprType->isEqual(returnType));
 
-  auto returnStmt = new (Context) ReturnStmt(SourceLoc(), returnExpr);
-  auto origBody = FD->getBody();
-  auto fakeBody = BraceStmt::create(Context, origBody->getLBraceLoc(),
-                                    { returnStmt },
-                                    origBody->getRBraceLoc());
-  FD->setBody(fakeBody);
-  return false;
+  SmallVector<Solution, 4> solutions;
+  cs.solve(nullptr, solutions, FreeTypeVariableBinding::Disallow);
+
+  // Handle failure.
+  if (solutions.size() != 1) {
+    // Try to salvage.
+    if (cs.salvage(solutions, transform->getResultExpr())) {
+      return true;
+    }
+
+    if (cs.getExpressionTooComplex(solutions)) {
+      cs.TC.diagnose(FD->getBody()->getStartLoc(), diag::expression_too_complex)
+           .highlight(FD->getBody()->getSourceRange());
+      return true;
+    }
+  }
+
+  auto &solution = solutions[0];
+  return transform->applySolution(cs, solution, FD, returnType,
+                                  /*skipClosures*/ false);
 }
 
 ConstraintSystem::TypeMatchResult ConstraintSystem::applyFunctionBuilder(
@@ -525,6 +576,9 @@ ConstraintSystem::TypeMatchResult ConstraintSystem::applyFunctionBuilder(
   auto builder = builderType->getAnyNominal();
   assert(builder && "Bad function builder type");
   assert(builder->getAttrs().hasAttribute<FunctionBuilderAttr>());
+
+  auto closureType = getType(closure)->castTo<FunctionType>();
+  auto closureResultType = closureType->getResult();
 
   // Check the form of this closure to see if we can apply the function-builder
   // translation at all.
@@ -543,8 +597,7 @@ ConstraintSystem::TypeMatchResult ConstraintSystem::applyFunctionBuilder(
     // Check whether we can apply this function builder.
     BuilderClosureVisitor visitor(getASTContext(), this,
                                   /*wantExpr=*/false, builderType);
-    (void)visitor.visit(closure->getBody());
-
+    (void)visitor.build(closure, closureResultType);
 
     // If we saw a control-flow statement or declaration that the builder
     // cannot handle, we don't have a well-formed function builder application.
@@ -588,34 +641,58 @@ ConstraintSystem::TypeMatchResult ConstraintSystem::applyFunctionBuilder(
 
   BuilderClosureVisitor visitor(getASTContext(), this,
                                 /*wantExpr=*/true, builderType);
-  Expr *singleExpr = visitor.visit(closure->getBody());
-
-  if (TC.precheckedClosures.insert(closure).second &&
-      TC.preCheckExpression(singleExpr, closure))
+  auto transform = visitor.build(closure, closureResultType);
+  if (!transform)
     return getTypeMatchFailure(locator);
-
-  singleExpr = generateConstraints(singleExpr, closure);
-  if (!singleExpr)
-    return getTypeMatchFailure(locator);
-
-  Type transformedType = getType(singleExpr);
-  assert(transformedType && "Missing type");
 
   // Record the transformation.
   assert(std::find_if(builderTransformedClosures.begin(),
                       builderTransformedClosures.end(),
-                      [&](const std::tuple<ClosureExpr *, Type, Expr *> &elt) {
-                        return std::get<0>(elt) == closure;
+                      [&](const std::pair<ClosureExpr *, BuilderTransform> &elt) {
+                        return elt.first == closure;
                       }) == builderTransformedClosures.end() &&
          "already transformed this closure along this path!?!");
   builderTransformedClosures.push_back(
-    std::make_tuple(closure, builderType, singleExpr));
+    std::make_pair(closure, std::move(*transform)));
 
-  // Bind the result type of the closure to the type of the transformed
-  // expression.
-  Type closureType = getType(closure);
-  auto fnType = closureType->castTo<FunctionType>();
-  addConstraint(ConstraintKind::Equal, fnType->getResult(), transformedType,
-                locator);
   return getTypeMatchSuccess();
+}
+
+bool BuilderTransform::applySolution(ConstraintSystem &cs,
+                                     const Solution &solution,
+                                     AnyFunctionRef fn,
+                                     Type returnType,
+                                     bool skipClosures) const {
+  auto fnDecl = fn.getAbstractFunctionDecl();
+  auto closure = cast_or_null<ClosureExpr>(fn.getAbstractClosureExpr());
+  assert(fnDecl || closure);
+
+  Expr *returnExpr = ResultExpr;
+  bool discardedExpr = false;
+  if (fnDecl) {
+    // We own the solution in this case, so this cast is safe.
+    returnExpr = cs.applySolution(const_cast<Solution&>(solution),
+                                  returnExpr, returnType,
+                                  discardedExpr, skipClosures);
+  } else {
+    returnExpr = cs.applySolutionRecursive(solution, closure, returnExpr,
+                                           returnType, CTP_ReturnStmt,
+                                           discardedExpr, skipClosures);
+  }
+  if (!returnExpr)
+    return true;
+
+  auto origBody = fn.getBody();
+  auto returnStmt = new (cs.TC.Context) ReturnStmt(SourceLoc(), returnExpr);
+  auto newBody = BraceStmt::create(cs.TC.Context, origBody->getLBraceLoc(),
+                                   { returnStmt },
+                                   origBody->getRBraceLoc());
+
+  if (fnDecl) {
+    fnDecl->setBody(newBody);
+  } else {
+    closure->setBody(newBody, /*isSingleExpression=*/true);
+  }
+
+  return false;
 }

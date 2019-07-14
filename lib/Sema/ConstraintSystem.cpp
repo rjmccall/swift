@@ -16,6 +16,8 @@
 //
 //===----------------------------------------------------------------------===//
 #include "ConstraintSystem.h"
+
+#include "BuilderTransform.h"
 #include "ConstraintGraph.h"
 #include "CSDiagnostics.h"
 #include "CSFix.h"
@@ -69,6 +71,14 @@ ExpressionTimer::~ExpressionTimer() {
                            elapsedMS, WarnLimit)
       .highlight(E->getSourceRange());
 }
+
+Solution::Solution(ConstraintSystem &cs, const Score &score)
+  : constraintSystem(&cs), FixedScore(score) {}
+
+Solution::Solution(Solution &&other) = default;
+Solution &Solution::operator=(Solution &&other) = default;
+
+Solution::~Solution() {}
 
 ConstraintSystem::ConstraintSystem(TypeChecker &tc, DeclContext *dc,
                                    ConstraintSystemOptions options,
