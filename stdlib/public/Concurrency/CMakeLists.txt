@@ -10,6 +10,17 @@
 #
 #===----------------------------------------------------------------------===#
 
+set(swift_concurrency_c_compile_flags)
+
+# clang-cl doesn't accept _InterlockedCompareExchange128 without this.
+if(SWIFT_HOST_VARIANT_ARCH STREQUAL x86_64)
+  if(CMAKE_C_COMPILER_ID MATCHES Clang)
+    list(APPEND swift_concurrency_c_compile_flags
+      -mcx16)
+  endif()
+endif()
+
+
 add_swift_target_library(swift_Concurrency ${SWIFT_STDLIB_LIBRARY_BUILD_TYPES} IS_STDLIB
   Actor.swift
   PartialAsyncTask.swift
@@ -37,6 +48,7 @@ add_swift_target_library(swift_Concurrency ${SWIFT_STDLIB_LIBRARY_BUILD_TYPES} I
 
   C_COMPILE_FLAGS
     -Dswift_Concurrency_EXPORTS
+    ${swift_concurrency_c_compile_flags}
   SWIFT_COMPILE_FLAGS
     ${SWIFT_STANDARD_LIBRARY_SWIFT_FLAGS}
     -parse-stdlib
