@@ -228,7 +228,8 @@ static bool needsForeignMetadataCompletionFunction(IRGenModule &IGM,
 
 static bool needsForeignMetadataCompletionFunction(IRGenModule &IGM,
                                                    ClassDecl *decl) {
-  return IGM.getOptions().LazyInitializeClassMetadata || decl->hasSuperclass();
+  return IGM.getOptions().LazyInitializeClassMetadata ||
+         decl->hasSuperclassForImplementation();
 }
 
 /*****************************************************************************/
@@ -1539,7 +1540,7 @@ namespace {
 
       MetadataLayout = &IGM.getClassMetadataLayout(Type);
 
-      if (auto superclassDecl = getType()->getSuperclassDecl()) {
+      if (auto superclassDecl = getType()->getSuperclassDeclForImplementation()) {
         if (MetadataLayout && MetadataLayout->hasResilientSuperclass())
           ResilientSuperClassRef = IGM.getTypeEntityReference(superclassDecl);
       }
@@ -1770,7 +1771,7 @@ namespace {
     void addLayoutInfo() {
 
       // TargetRelativeDirectPointer<Runtime, const char> SuperclassType;
-      if (auto superclassType = getType()->getSuperclass()) {
+      if (auto superclassType = getType()->getSuperclassForImplementation()) {
         GenericSignature genericSig = getType()->getGenericSignature();
         B.addRelativeAddress(IGM.getTypeRef(superclassType, genericSig,
                                             MangledTypeRefRole::Metadata)
@@ -2936,7 +2937,8 @@ namespace {
     }
 
     llvm::Constant *getSuperclassMetadata() {
-      Type type = Target->mapTypeIntoContext(Target->getSuperclass());
+      Type type = Target->mapTypeIntoContext(
+                    Target->getSuperclassForImplementation());
       auto *metadata =
           tryEmitConstantHeapMetadataRef(IGM, type->getCanonicalType(),
                                          /*allowUninit*/ false);
@@ -2964,7 +2966,7 @@ namespace {
       }
 
       // If this is a root class, use SwiftObject as our formal parent.
-      if (!Target->hasSuperclass()) {
+      if (!Target->hasSuperclassForImplementation()) {
         // This is only required for ObjC interoperation.
         if (!IGM.ObjCInterop) {
           B.addNullPointer(IGM.TypeMetadataPtrTy);
@@ -3667,7 +3669,7 @@ namespace {
     bool shouldAddNullSuperclass() { return false; }
 
     llvm::Constant *getSuperclassMetadata() {
-      Type superclass = type->getSuperclass(/*useArchetypes=*/false);
+      Type superclass = type->getSuperclassForImplementation(/*useArchetypes=*/false);
       auto *metadata =
           IGM.getAddrOfTypeMetadata(superclass->getCanonicalType());
       return metadata;
@@ -4834,7 +4836,7 @@ namespace {
 
     void emitInitializeMetadata(IRGenFunction &IGF, llvm::Value *metadata,
                                 MetadataDependencyCollector *collector) {
-      if (!Target->hasSuperclass()) {
+      if (!Target->hasSuperclassForImplementation()) {
         assert(IGM.getOptions().LazyInitializeClassMetadata &&
                "should have superclass if not lazy initializing class metadata");
         return;
@@ -4842,7 +4844,7 @@ namespace {
 
       // Emit a reference to the superclass.
       auto superclass = IGF.emitAbstractTypeMetadataRef(
-                                   Target->getSuperclass()->getCanonicalType());
+                Target->getSuperclassForImplementation()->getCanonicalType());
 
       // Dig out the address of the superclass field and store.
       auto &layout = IGF.IGM.getForeignMetadataLayout(Target);
@@ -4903,7 +4905,7 @@ namespace {
       B.addNullPointer(IGM.TypeMetadataPtrTy);
 
       // But remember if we might need to change it.
-      if (Target->hasSuperclass())
+      if (Target->hasSuperclassForImplementation())
         CanBeConstant = false;
     }
 

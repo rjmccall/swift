@@ -1589,11 +1589,35 @@ Type TypeBase::getSuperclass(bool useArchetypes) {
   return superclassTy.subst(subMap);
 }
 
+Type TypeBase::getSuperclassForImplementation(bool useArchetypes) {
+  Type superclass = getSuperclass();
+  auto cls = getClassOrBoundGenericClass();
+  if (cls && cls->hasPotentiallyDifferentSuperclassForImplementation()) {
+    if (cls->isDefaultActor()) {
+      // The replacement types are never dependent, so we can just do this.
+      superclass = cls->getSuperclassForImplementation();
+    }
+  }
+  return superclass;
+}
+
 Type TypeBase::getRootClass(bool useArchetypes) {
   Type iterator = this;
   assert(iterator);
 
   while (auto superclass = iterator->getSuperclass(useArchetypes)) {
+    iterator = superclass;
+  }
+
+  return iterator;
+}
+
+Type TypeBase::getRootClassForImplementation(bool useArchetypes) {
+  Type iterator = this;
+  assert(iterator);
+
+  while (auto superclass =
+           iterator->getSuperclassForImplementation(useArchetypes)) {
     iterator = superclass;
   }
 
@@ -3984,6 +4008,19 @@ Type TypeBase::getSuperclassForDecl(const ClassDecl *baseClass,
 #endif
 
   return ErrorType::get(this);
+}
+
+Type TypeBase::getSuperclassForDeclForImplementation(const ClassDecl *baseClass,
+                                                     bool useArchetypes) {
+  // If the requested superclass is the for-implementation injected
+  // superclass, just return that class's declared type.
+  if (baseClass->isDefaultActorSuperclass()) {
+    return baseClass->getDeclaredInterfaceType();
+  }
+
+  // Otherwise, the class should be in the normal inheritance hierarchy
+  // and the standard implementation should work.
+  return getSuperclassForDecl(baseClass, useArchetypes);
 }
 
 TypeSubstitutionMap

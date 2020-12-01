@@ -111,7 +111,7 @@ private:
   /// Add fields associated with the given class and its bases.
   void addClassMembers(ClassDecl *theClass) {
     // Visit the superclass first.
-    if (auto *superclassDecl = theClass->getSuperclassDecl()) {
+    if (auto *superclassDecl = theClass->getSuperclassDeclForImplementation()) {
       if (superclassDecl->hasClangNode()) {
         // Nothing to do; Objective-C classes do not add new members to
         // Swift class metadata.

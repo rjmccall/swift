@@ -20,6 +20,11 @@ if(SWIFT_HOST_VARIANT_ARCH STREQUAL x86_64)
   endif()
 endif()
 
+set(swift_concurrency_objc_sources
+  DefaultActor.mm)
+
+set(LLVM_OPTIONAL_SOURCES
+  ${swift_concurrency_objc_sources})
 
 add_swift_target_library(swift_Concurrency ${SWIFT_STDLIB_LIBRARY_BUILD_TYPES} IS_STDLIB
   Actor.cpp
@@ -33,6 +38,7 @@ add_swift_target_library(swift_Concurrency ${SWIFT_STDLIB_LIBRARY_BUILD_TYPES} I
   TaskStatus.cpp
   TaskGroup.swift
   Mutex.cpp
+  ${swift_concurrency_objc_sources}
 
   SWIFT_MODULE_DEPENDS_OSX Darwin
   SWIFT_MODULE_DEPENDS_IOS Darwin

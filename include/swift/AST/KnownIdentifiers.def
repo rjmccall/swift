@@ -142,7 +142,6 @@ IDENTIFIER(withKeywordArguments)
 IDENTIFIER(wrapped)
 IDENTIFIER(wrappedValue)
 IDENTIFIER(wrapperValue)
-IDENTIFIER_WITH_NAME(actorStorage, "$__actor_storage")
 
 // Kinds of layout constraints
 IDENTIFIER_WITH_NAME(UnknownLayout, "_UnknownLayout")
@@ -205,6 +204,12 @@ IDENTIFIER_WITH_NAME(dollarInterpolation, "$interpolation")
 IDENTIFIER(arrayLiteral)
 IDENTIFIER(dictionaryLiteral)
 IDENTIFIER(className)
+
+IDENTIFIER(DefaultActor)
+IDENTIFIER(NSObjectDefaultActor)
+IDENTIFIER(_defaultActorInitialize)
+IDENTIFIER(_defaultActorDestroy)
+IDENTIFIER(_defaultActorEnqueue)
 
 IDENTIFIER_(ErrorType)
 IDENTIFIER(Code)

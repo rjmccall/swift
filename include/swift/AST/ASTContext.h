@@ -580,6 +580,12 @@ public:
 
   // Retrieve the declaration of Swift._stdlib_isOSVersionAtLeast.
   FuncDecl *getIsOSVersionAtLeastDecl() const;
+
+  /// Retrieve the declaration of _Concurrency.DefaultActor.
+  ClassDecl *getDefaultActorDecl() const;
+
+  /// Retrieve the declaration of _Concurrency.NSObjectDefaultActor.
+  ClassDecl *getNSObjectDefaultActorDecl() const;
   
   /// Look for the declaration with the given name within the
   /// Swift module.

@@ -784,9 +784,9 @@ bool irgen::isSpecializedNominalTypeMetadataStaticallyAddressable(
                  AncestryOptions(AncestryFlags::ClangImported))) {
       return false;
     }
-    if (auto *theSuperclass = theClass->getSuperclassDecl()) {
+    if (auto *theSuperclass = theClass->getSuperclassDeclForImplementation()) {
       auto superclassType =
-          type->getSuperclass(/*useArchetypes=*/false)->getCanonicalType();
+          type->getSuperclassForImplementation(/*useArchetypes=*/false)->getCanonicalType();
       if (!isCanonicalInitializableTypeMetadataStaticallyAddressable(
               IGM, superclassType) &&
           !tryEmitConstantHeapMetadataRef(
@@ -2214,7 +2214,7 @@ irgen::emitCanonicalSpecializedGenericTypeMetadataAccessFunction(
           IGF, argument, initializedTypes);
     }
   }
-  Type superclassType = theType->getSuperclass(/*useArchetypes=*/false);
+  Type superclassType = theType->getSuperclassForImplementation(/*useArchetypes=*/false);
   if (superclassType) {
     emitIdempotentCanonicalSpecializedClassMetadataInitializationComponent(
         IGF, superclassType->getCanonicalType(), initializedTypes);

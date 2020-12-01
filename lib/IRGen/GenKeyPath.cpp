@@ -681,7 +681,7 @@ emitMetadataTypeRefForKeyPath(IRGenModule &IGM, CanType type,
 static unsigned getClassFieldIndex(ClassDecl *classDecl, VarDecl *property) {
   SmallVector<ClassDecl *, 3> superclasses;
   for (auto *superDecl = classDecl; superDecl != nullptr;
-       superDecl = superDecl->getSuperclassDecl()) {
+       superDecl = superDecl->getSuperclassDeclForImplementation()) {
     superclasses.push_back(superDecl);
   }
 

@@ -861,6 +861,16 @@ public:
   ///          superclass.
   Type getSuperclass(bool useArchetypes = true);
 
+  /// Retrieve the superclass of this type at the implementation level;
+  /// see ClassDecl::getSuperclassForImplementation.
+  ///
+  /// \param useArchetypes Whether to use context archetypes for outer generic
+  /// parameters if the class is nested inside a generic function.
+  ///
+  /// \returns The superclass of this type, or a null type if it has no
+  ///          superclass.
+  Type getSuperclassForImplementation(bool useArchetypes = true);
+
   /// Retrieve the root class of this type by repeatedly retrieving the
   /// superclass.
   ///
@@ -870,6 +880,16 @@ public:
   /// \returns The base class of this type, or this type itself if it has no
   ///          superclasses.
   Type getRootClass(bool useArchetypes = true);
+
+  /// Retrieve the root class of this type at the implementation level
+  /// by repeatedly retrieving the superclass.
+  ///
+  /// \param useArchetypes Whether to use context archetypes for outer generic
+  /// parameters if the class is nested inside a generic function.
+  ///
+  /// \returns The base class of this type, or this type itself if it has no
+  ///          superclasses.
+  Type getRootClassForImplementation(bool useArchetypes = true);
 
   /// True if this type is the exact superclass of another type.
   ///
@@ -902,6 +922,8 @@ public:
   /// parameters if the class is nested inside a generic function.
   Type getSuperclassForDecl(const ClassDecl *classDecl,
                             bool useArchetypes = true);
+  Type getSuperclassForDeclForImplementation(const ClassDecl *classDecl,
+                                             bool useArchetypes = true);
 
   /// True if this type is the superclass of another type, or a generic
   /// type that could be bound to the superclass.

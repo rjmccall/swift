@@ -3560,6 +3560,20 @@ public:
   /// is no superclass.
   ClassDecl *getSuperclassDecl() const;
 
+  /// Determine whether this class has a superclass at the
+  /// language-implementation level.
+  bool hasSuperclassForImplementation() const;
+
+  /// Retrieve the superclass of this class at the implementation level,
+  /// or null if there is no superclass.
+  ///
+  /// Currently this differs from getSuperclass() only for default actors.
+  Type getSuperclassForImplementation() const;
+
+  /// Retrieve the ClassDecl for the superclass of this class at the
+  /// implementation level, or null if there is no superclass.
+  ClassDecl *getSuperclassDeclForImplementation() const;
+
   /// Check if this class is a superclass or equal to the given class.
   bool isSuperclassOf(ClassDecl *other) const;
 
@@ -3624,6 +3638,30 @@ public:
 
   /// Whether the class is an actor.
   bool isActor() const;
+
+  /// Whether the class is (known to be) a default actor.
+  bool isDefaultActor() const;
+
+  /// Does this class explicitly declare any of the methods that
+  /// would prevent it from being a default actor?
+  bool hasExplicitCustomActorMethods() const;
+
+  /// A quick check for whether we need to check whether a class
+  /// might have a different superclass at the implementation level
+  /// than it does at the user-semantics level.
+  bool hasPotentiallyDifferentSuperclassForImplementation() const {
+    // We can infer actor-ness based on superclasses, but having a
+    // superclass precludes being an implicit default actor, so we
+    // can just check for an explicit actor attribute.
+    return getAttrs().getAttribute<ActorAttr>() != nullptr;
+  }
+
+  /// Is this the NSObject class type?
+  bool isNSObject() const;
+
+  /// Is this one of implicit superclasses used for default actors, i.e.
+  /// Concurrency.DefaultActor or Concurrency.NSObjectDefaultActor?
+  bool isDefaultActorSuperclass() const;
 
   /// Returns true if the class has designated initializers that are not listed
   /// in its members.

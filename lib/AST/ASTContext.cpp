@@ -227,6 +227,12 @@ struct ASTContext::Implementation {
   /// The declaration of Swift.AutoreleasingUnsafeMutablePointer<T>.memory.
   VarDecl *AutoreleasingUnsafeMutablePointerMemoryDecl = nullptr;
 
+  /// The declaration of _Concurrency.DefaultActor.
+  ClassDecl *DefaultActorDecl = nullptr;
+
+  /// The declaration of _Concurrency.NSObjectDefaultActor.
+  ClassDecl *NSObjectDefaultActorDecl = nullptr;
+
   // Declare cached declarations for each of the known declarations.
 #define FUNC_DECL(Name, Id) FuncDecl *Get##Name = nullptr;
 #include "swift/AST/KnownDecls.def"
@@ -926,6 +932,26 @@ Type ASTContext::get##NAME##Type() const { \
 
 #include "swift/AST/KnownSDKTypes.def"
 
+template <class DeclClass>
+static DeclClass *lookupCachedInModule(const ASTContext &ctx,
+                                       DeclClass *&cache,
+                                       Identifier moduleName,
+                                       Identifier typeName) {
+  if (cache) return cache;
+
+  if (auto M = ctx.getLoadedModule(moduleName)) {
+    SmallVector<ValueDecl *, 1> results;
+    M->lookupValue(typeName, NLKind::UnqualifiedLookup, results);
+
+    for (auto result: results) {
+      if (auto match = dyn_cast<DeclClass>(result))
+        return match;
+    }
+  }
+
+  return nullptr;
+}
+
 ProtocolDecl *ASTContext::getProtocol(KnownProtocolKind kind) const {
   // Check whether we've already looked for and cached this protocol.
   unsigned index = (unsigned)kind;
@@ -970,6 +996,16 @@ ProtocolDecl *ASTContext::getProtocol(KnownProtocolKind kind) const {
   }
 
   return nullptr;
+}
+
+ClassDecl *ASTContext::getDefaultActorDecl() const {
+  return lookupCachedInModule(*this, getImpl().DefaultActorDecl,
+                              Id_Concurrency, Id_DefaultActor);
+}
+
+ClassDecl *ASTContext::getNSObjectDefaultActorDecl() const {
+  return lookupCachedInModule(*this, getImpl().NSObjectDefaultActorDecl,
+                              Id_Concurrency, Id_NSObjectDefaultActor);
 }
 
 /// Find the implementation for the given "intrinsic" library function.

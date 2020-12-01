@@ -6226,7 +6226,7 @@ void IRGenSILFunction::visitSuperMethodInst(swift::SuperMethodInst *i) {
       //
       // It's OK to know that the superclass of Derived is Middle, but the
       // method requires using a resilient access pattern.
-      auto superTy = instanceTy->getSuperclass();
+      auto superTy = instanceTy->getSuperclassForImplementation();
       superMetadata = emitClassHeapMetadataRef(*this, superTy->getCanonicalType(),
                                                MetadataValueType::TypeMetadata,
                                                MetadataState::Complete);

@@ -4187,6 +4187,13 @@ bool ClassDecl::isActor() const {
                            false);
 }
 
+bool ClassDecl::isDefaultActor() const {
+  auto mutableThis = const_cast<ClassDecl *>(this);
+  return evaluateOrDefault(getASTContext().evaluator,
+                           IsDefaultActorRequest{mutableThis},
+                           false);
+}
+
 bool ClassDecl::hasMissingDesignatedInitializers() const {
   return evaluateOrDefault(
       getASTContext().evaluator,
@@ -7894,6 +7901,75 @@ Type TypeBase::getSwiftNewtypeUnderlyingType() {
         return varDecl->getType();
 
   return {};
+}
+
+bool ClassDecl::hasExplicitCustomActorMethods() const {
+  auto &ctx = getASTContext();
+  for (auto member: getMembers()) {
+    if (member->isImplicit()) continue;
+
+    // Methods called enqueue(partialTask:)
+    if (auto func = dyn_cast<FuncDecl>(member)) {
+      if (FuncDecl::isEnqueuePartialTaskName(ctx, func->getName()))
+        return true;
+    }
+  }
+
+  return false;
+}
+
+bool ClassDecl::hasSuperclassForImplementation() const {
+  if (hasSuperclass()) return true;
+  if (!hasPotentiallyDifferentSuperclassForImplementation()) return false;
+  return isDefaultActor();
+}
+
+ClassDecl *ClassDecl::getSuperclassDeclForImplementation() const {
+  auto superclassDecl = getSuperclassDecl();
+  if (hasPotentiallyDifferentSuperclassForImplementation()) {
+    if (isDefaultActor()) {
+      if (!superclassDecl) {
+        superclassDecl = getASTContext().getDefaultActorDecl();
+      } else if (superclassDecl->isNSObject()) {
+        superclassDecl = getASTContext().getNSObjectDefaultActorDecl();
+      }
+    }
+  }
+  return superclassDecl;
+}
+
+Type ClassDecl::getSuperclassForImplementation() const {
+  auto superclass = getSuperclass();
+  if (hasPotentiallyDifferentSuperclassForImplementation()) {
+    ClassDecl *superclassDecl = nullptr;
+    if (isDefaultActor()) {
+      if (!superclass) {
+        superclassDecl = getASTContext().getDefaultActorDecl();
+      } else if (superclass->getClassOrBoundGenericClass()->isNSObject()) {
+        superclassDecl = getASTContext().getNSObjectDefaultActorDecl();
+      }
+    }
+    if (superclassDecl) {
+      superclass = superclassDecl->getDeclaredType();
+    }
+  }
+  return superclass;
+}
+
+bool ClassDecl::isDefaultActorSuperclass() const {
+  ASTContext &ctx = getASTContext();
+  if (getName() == ctx.Id_DefaultActor ||
+      getName() == ctx.Id_NSObjectDefaultActor)
+    if (getModuleContext()->getName() == ctx.Id_Concurrency)
+      return true;
+  return false;
+}
+
+bool ClassDecl::isNSObject() const {
+  if (!getName().is("NSObject")) return false;
+  ASTContext &ctx = getASTContext();
+  return (getModuleContext()->getName() == ctx.Id_Foundation ||
+          getModuleContext()->getName() == ctx.Id_ObjectiveC);
 }
 
 Type ClassDecl::getSuperclass() const {

@@ -149,11 +149,7 @@ StoredPropertiesRequest::evaluate(Evaluator &evaluator,
   for (auto *member : decl->getMembers()) {
     if (auto *var = dyn_cast<VarDecl>(member))
       if (!var->isStatic() && var->hasStorage()) {
-        // Actor storage always goes at the beginning.
-        if (var->getName() == ctx.Id_actorStorage)
-          results.insert(results.begin(), var);
-        else
-          results.push_back(var);
+        results.push_back(var);
       }
   }
 

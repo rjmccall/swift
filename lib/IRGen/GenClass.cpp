@@ -220,8 +220,8 @@ namespace {
         return;
       }
 
-      if (theClass->hasSuperclass()) {
-        SILType superclassType = classType.getSuperclass();
+      if (theClass->hasSuperclassForImplementation()) {
+        SILType superclassType = classType.getSuperclassForImplementation();
         auto superclassDecl = superclassType.getClassOrBoundGenericClass();
         assert(superclassType && superclassDecl);
 
@@ -275,6 +275,9 @@ namespace {
     void addDirectFieldsFromClass(ClassDecl *rootClass, SILType rootClassType,
                                   ClassDecl *theClass, SILType classType,
                                   bool superclass) {
+      if (theClass->isDefaultActorSuperclass())
+        addDefaultActorHeader();
+
       for (VarDecl *var : theClass->getStoredProperties()) {
         SILType type = classType.getFieldType(var, IGM.getSILModule(),
                                               TypeExpansionContext::minimal());
@@ -1167,7 +1170,8 @@ namespace {
       Type rootType;
       if (specializedGenericType && rootClass->isGenericContext()) {
         rootType =
-            (*specializedGenericType)->getRootClass(/*useArchetypes=*/false);
+            (*specializedGenericType)->getRootClassForImplementation(
+               /*useArchetypes=*/false);
       } else {
         rootType = Type();
       }
@@ -1180,11 +1184,11 @@ namespace {
       // If this class has no formal superclass, then its actual
       // superclass is SwiftObject, i.e. the root class.
       llvm::Constant *superPtr;
-      if (getClass()->hasSuperclass()) {
-        auto base = getClass()->getSuperclassDecl();
+      if (getClass()->hasSuperclassForImplementation()) {
+        auto base = getClass()->getSuperclassDeclForImplementation();
         if (specializedGenericType && base->isGenericContext()) {
           superPtr = getMetaclassRefOrNull(
-              (*specializedGenericType)->getSuperclass(/*useArchetypes=*/false),
+              (*specializedGenericType)->getSuperclassForImplementation(/*useArchetypes=*/false),
               base);
         } else {
           superPtr = getMetaclassRefOrNull(Type(), base);
@@ -2396,7 +2400,8 @@ ClassDecl *IRGenModule::getObjCRuntimeBaseClass(Identifier name,
 /// Lazily declare the ObjC runtime base class for a Swift root class.
 ClassDecl *
 IRGenModule::getObjCRuntimeBaseForSwiftRootClass(ClassDecl *theClass) {
-  assert(!theClass->hasSuperclass() && "must pass a root class");
+  assert(!theClass->hasSuperclassForImplementation() &&
+         "must pass a root class");
   
   Identifier name;
   // If the class declares its own ObjC runtime base, use it.
@@ -2411,7 +2416,7 @@ IRGenModule::getObjCRuntimeBaseForSwiftRootClass(ClassDecl *theClass) {
 }
 
 ClassDecl *irgen::getRootClassForMetaclass(IRGenModule &IGM, ClassDecl *C) {
-  while (auto superclass = C->getSuperclassDecl())
+  while (auto superclass = C->getSuperclassDeclForImplementation())
     C = superclass;
 
   // If the formal root class is imported from Objective-C, then
@@ -2595,7 +2600,7 @@ irgen::emitVirtualMethodValue(IRGenFunction &IGF,
     // For a non-resilient 'super' call, emit a reference to the superclass
     // of the static type of the 'self' value.
     auto instanceTy = baseType.getASTType()->getMetatypeInstanceType();
-    auto superTy = instanceTy->getSuperclass();
+    auto superTy = instanceTy->getSuperclassForImplementation();
     metadata = emitClassHeapMetadataRef(IGF,
                                         superTy->getCanonicalType(),
                                         MetadataValueType::TypeMetadata,
