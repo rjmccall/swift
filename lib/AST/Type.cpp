@@ -1624,12 +1624,12 @@ Type TypeBase::getRootClassForImplementation(bool useArchetypes) {
   return iterator;
 }
 
-bool TypeBase::isExactSuperclassOf(Type ty) {
+static bool isExactSuperclassOf(Type target, Type ty, bool forImpl) {
   // For there to be a superclass relationship, we must be a class, and
   // the potential subtype must be a class, superclass-bounded archetype,
   // or subclass existential involving an imported class and @objc
   // protocol.
-  if (!getClassOrBoundGenericClass() ||
+  if (!target->getClassOrBoundGenericClass() ||
       !(ty->mayHaveSuperclass() ||
         (ty->isObjCExistentialType() &&
          ty->getSuperclass() &&
@@ -1641,10 +1641,19 @@ bool TypeBase::isExactSuperclassOf(Type ty) {
     if (auto *classDecl = ty->getClassOrBoundGenericClass())
       if (!seen.insert(classDecl).second)
         return false;
-    if (ty->isEqual(this))
+    if (ty->isEqual(target))
       return true;
-  } while ((ty = ty->getSuperclass()));
+  } while ((ty = forImpl ? ty->getSuperclassForImplementation()
+                         : ty->getSuperclass()));
   return false;
+}
+
+bool TypeBase::isExactSuperclassOf(Type ty) {
+  return ::isExactSuperclassOf(this, ty, false);
+}
+
+bool TypeBase::isExactSuperclassOfForImplementation(Type ty) {
+  return ::isExactSuperclassOf(this, ty, true);
 }
 
 namespace {

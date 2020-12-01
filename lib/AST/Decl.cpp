@@ -4269,7 +4269,7 @@ ClassAncestryFlagsRequest::evaluate(Evaluator &evaluator,
     if (CD->getAttrs().hasAttribute<RequiresStoredPropertyInitsAttr>())
       result |= AncestryFlags::RequiresStoredPropertyInits;
 
-    CD = CD->getSuperclassDecl();
+    CD = CD->getSuperclassDeclForImplementation();
   } while (CD != nullptr);
 
   return AncestryFlags(result.toRaw());

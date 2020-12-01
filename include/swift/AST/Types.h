@@ -905,6 +905,7 @@ public:
   /// for queries that care whether a generic class type can be substituted into
   /// a type's subclass.
   bool isExactSuperclassOf(Type ty);
+  bool isExactSuperclassOfForImplementation(Type ty);
 
   /// Get the substituted base class type, starting from a base class
   /// declaration and a substituted derived class type.

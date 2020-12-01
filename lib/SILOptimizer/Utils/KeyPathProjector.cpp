@@ -128,7 +128,7 @@ public:
         // Handle the case where the storedProperty is in a super class.
         while (Ref->getType().getClassOrBoundGenericClass() !=
                storedProperty->getDeclContext()) {
-          SILType superCl = Ref->getType().getSuperclass();
+          SILType superCl = Ref->getType().getSuperclassForImplementation();
           if (!superCl) {
             // This should never happen, because the property should be in the
             // decl or in a superclass of it. Just handle this to be on the safe

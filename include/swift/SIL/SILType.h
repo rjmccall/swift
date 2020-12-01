@@ -442,14 +442,6 @@ public:
 
   /// Return the immediate superclass type of this type, or null if
   /// it's the most-derived type.
-  SILType getSuperclass() const {
-    auto superclass = getASTType()->getSuperclass();
-    if (!superclass) return SILType();
-    return SILType::getPrimitiveObjectType(superclass->getCanonicalType());
-  }
-
-  /// Return the immediate superclass type of this type, or null if
-  /// it's the most-derived type.
   SILType getSuperclassForImplementation() const {
     auto superclass = getASTType()->getSuperclassForImplementation();
     if (!superclass) return SILType();
@@ -458,7 +450,7 @@ public:
 
   /// Return true if Ty is a subtype of this exact SILType, or false otherwise.
   bool isExactSuperclassOf(SILType Ty) const {
-    return getASTType()->isExactSuperclassOf(Ty.getASTType());
+    return getASTType()->isExactSuperclassOfForImplementation(Ty.getASTType());
   }
 
   /// Return true if Ty is a subtype of this SILType, or if this SILType

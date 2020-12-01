@@ -47,7 +47,7 @@ open class DefaultActor {
 #if _runtime(_ObjC)
 @_fixed_layout
 @objc @_swift_native_objc_runtime_base(__SwiftNSObjectDefaultActorBase)
-open class NSObjectDefaultActor {
+open class NSObjectDefaultActor: NSObject {
   @inlinable
   @nonobjc
   public init() {

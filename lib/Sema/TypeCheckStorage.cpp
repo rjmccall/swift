@@ -145,7 +145,6 @@ StoredPropertiesRequest::evaluate(Evaluator &evaluator,
   if (isa<SourceFile>(decl->getModuleScopeContext()))
     computeLoweredStoredProperties(decl);
 
-  ASTContext &ctx = decl->getASTContext();
   for (auto *member : decl->getMembers()) {
     if (auto *var = dyn_cast<VarDecl>(member))
       if (!var->isStatic() && var->hasStorage()) {
