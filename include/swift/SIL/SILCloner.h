@@ -293,6 +293,9 @@ public:
   SILValue getOpValue(SILValue Value) {
     return asImpl().getMappedValue(Value);
   }
+  SILValue getOptionalOpValue(SILValue Value) {
+    return Value ? getOpValue(Value) : SILValue();
+  }
   template <size_t N, typename ArrayRefType>
   SmallVector<SILValue, N> getOpValueArray(ArrayRefType Values) {
     SmallVector<SILValue, N> Ret(Values.size());
@@ -3053,7 +3056,8 @@ void SILCloner<ImplClass>
   recordClonedInstruction(Inst,
                           getBuilder().createHopToExecutor(
                             getOpLocation(Inst->getLoc()),
-                            getOpValue(Inst->getTargetExecutor())));
+                            getOpValue(Inst->getTargetExecutor()),
+                            getOptionalOpValue(Inst->getPossibleActiveExecutor())));
 }
 
 

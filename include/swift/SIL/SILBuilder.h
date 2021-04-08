@@ -2163,9 +2163,12 @@ public:
                                                                  Throws));
   }
 
-  HopToExecutorInst *createHopToExecutor(SILLocation Loc, SILValue Actor) {
+  HopToExecutorInst *createHopToExecutor(SILLocation Loc, SILValue executor,
+                                         SILValue possibleActiveExecutor =
+                                           SILValue()) {
     return insert(new (getModule()) HopToExecutorInst(getSILDebugLocation(Loc),
-                                                      Actor, hasOwnership()));
+                                                      executor,
+                                                      possibleActiveExecutor));
   }
 
   //===--------------------------------------------------------------------===//

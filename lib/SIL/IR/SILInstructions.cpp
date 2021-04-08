@@ -2419,6 +2419,20 @@ ConvertEscapeToNoEscapeInst *ConvertEscapeToNoEscapeInst::create(
   return CFI;
 }
 
+HopToExecutorInst *HopToExecutorInst::create(SILDebugLocation loc,
+                                             SILFunction &F,
+                                             SILValue targetExecutor,
+                                             SILValue possibleActiveExecutor) {
+  SILValue operandArray[2] = { targetExecutor, possibleActiveExecutor };
+  auto operands = llvm::makeArrayRef(operandArray);
+  if (!possibleActiveExecutor) operands = operands.drop_back();
+
+  auto totalSize = totalSizeToAlloc<Operand>(operands.size());
+  void *mem =
+    F.getModule().allocateInst(totalSize, alignof(HopToExecutorInst));
+  return ::new (mem) HopToExecutorInst(loc, operands);
+}
+
 bool KeyPathPatternComponent::isComputedSettablePropertyMutating() const {
   switch (getKind()) {
   case Kind::StoredProperty:

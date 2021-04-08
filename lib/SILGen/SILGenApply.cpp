@@ -4388,7 +4388,7 @@ RValue SILGenFunction::emitApply(ResultPlanPtr &&resultPlan,
   }
 
   ExecutorBreadcrumb breadcrumb;
-  
+
   // The presence of `implicitlyAsyncApply` indicates that the callee is a 
   // synchronous function isolated to an actor other than our own.
   // Such functions require the caller to hop to the callee's executor
@@ -4407,11 +4407,21 @@ RValue SILGenFunction::emitApply(ResultPlanPtr &&resultPlan,
                                         actorSelf);
     }
   } else if (ExpectedExecutor && substFnType->isAsync()) {
+    if (auto *funcDecl = dyn_cast_or_null<AbstractFunctionDecl>(calleeVD)) {
+      Optional<ManagedValue> actorSelf;
+
+      if (args.size() > 0)
+        actorSelf = args.back();
+
+      breadcrumb = emitHopToTargetActor(loc, getActorIsolation(funcDecl),
+                                        actorSelf);
+    }
+
     // Otherwise, if we're in an actor method ourselves, and we're calling into
     // any sort of async function, we'll want to make sure to hop back to our
     // own executor afterward, since the callee could have made arbitrary hops
     // out of our isolation domain.
-    breadcrumb = ExecutorBreadcrumb(ExpectedExecutor);
+    breadcrumb = ExecutorBreadcrumb(ExpectedExecutor,);
   }
 
   SILValue rawDirectResult;

@@ -17,6 +17,7 @@ namespace Lowering {
 /// active executor after making a hop to an actor for actor-isolated calls.
 class ExecutorBreadcrumb {
   SILValue Executor;
+  SILValue PossibleActiveExecutor;
   
 public:
   // An empty breadcrumb, indicating no hop back is necessary.
@@ -24,8 +25,9 @@ public:
   
   // A breadcrumb representing the need to hop back to the executor
   // represented by the given value.
-  explicit ExecutorBreadcrumb(SILValue executor)
-    : Executor(executor) {}
+  explicit ExecutorBreadcrumb(SILValue executor,
+                              SILValue possibleActiveExecutor)
+    : Executor(executor), PossibleActiveExecutor(possibleActiveExecutor) {}
   
   // Emits the hop back sequence, if any, necessary to get back to
   // the executor represented by this breadcrumb.

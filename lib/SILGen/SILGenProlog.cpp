@@ -606,8 +606,9 @@ ExecutorBreadcrumb SILGenFunction::emitHopToTargetActor(SILLocation loc,
 }
 
 void ExecutorBreadcrumb::emit(SILGenFunction &SGF, SILLocation loc) {
-  if (Executor)
-    SGF.B.createHopToExecutor(loc, Executor);
+  if (Executor) {
+    SGF.B.createHopToExecutor(loc, Executor, PossibleActiveExecutor);
+  }
 }
 
 SILValue SILGenFunction::emitGetCurrentExecutor(SILLocation loc) {
