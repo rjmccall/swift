@@ -60,6 +60,8 @@ FutureFragment::Status AsyncTask::waitFuture(AsyncTask *waitingTask) {
   assert(isFuture());
   auto fragment = futureFragment();
 
+  bool hasNotifiedDeparture = false;
+
   auto queueHead = fragment->waitQueue.load(std::memory_order_acquire);
   while (true) {
     switch (queueHead.getStatus()) {
@@ -79,6 +81,11 @@ FutureFragment::Status AsyncTask::waitFuture(AsyncTask *waitingTask) {
       _swift_tsan_release(static_cast<Job *>(waitingTask));
       // Task is now complete. We'll need to add ourselves to the queue.
       break;
+    }
+
+    if (!hasNotifiedDeparture) {
+      _swift_task_notifyPossibleDeparture();
+      hasNotifiedDeparture = true;
     }
 
     // Put the waiting task at the beginning of the wait queue.
@@ -791,6 +798,8 @@ AsyncTask *swift::swift_continuation_init(ContinuationAsyncContext *context,
   assert(task && "initializing a continuation with no current task");
   task->ResumeContext = context;
   task->ResumeTask = context->ResumeParent;
+
+  _swift_task_notifyPossibleDeparture();
 
   return task;
 }

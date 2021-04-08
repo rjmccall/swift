@@ -775,6 +775,7 @@ PollResult TaskGroupImpl::poll(AsyncTask *waitingTask) {
 
   // ==== 3) Add to wait queue -------------------------------------------------
   assert(assumed.readyTasks() == 0);
+  _swift_task_notifyPossibleDeparture();
   while (true) {
     // Put the waiting task at the beginning of the wait queue.
     if (waitQueue.compare_exchange_weak(

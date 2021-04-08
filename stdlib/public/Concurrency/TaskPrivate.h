@@ -47,6 +47,16 @@ void *_swift_task_alloc_specific(AsyncTask *task, size_t size);
 /// done on behalf of a child task.
 void _swift_task_dealloc_specific(AsyncTask *task, void *ptr);
 
+/// Notify the actor runtime that the current task is potentially
+/// departing the current thread.  Generally this needs to be
+/// called before the task is potentially enqueued anywhere else,
+/// because when the task is resumed it can drop the last reference
+/// to the current executor.
+///
+/// The places that call this are also places where we'll need to
+/// do task status bookkeeping in the future.
+void _swift_task_notifyPossibleDeparture();
+
 /// Given that we've already set the right executor as the active
 /// executor, run the given job.  This does additional bookkeeping
 /// related to the active task.

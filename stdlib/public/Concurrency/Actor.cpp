@@ -41,6 +41,11 @@ static bool shouldYieldThread() {
 
 namespace {
 
+enum IsOwned_t : bool {
+  IsNotOwned = false,
+  IsOwned = true
+};
+
 /// An extremely silly class which exists to make pointer
 /// default-initialization constexpr.
 template <class T> struct Pointer {
@@ -76,6 +81,11 @@ class ExecutorTrackingInfo {
   /// unless the passed-in executor is generic.
   bool AllowsSwitching = true;
 
+  /// Whether the active executor is owned by this tracking info.
+  /// If so, giving it up must release the actor.  This implies that
+  /// the current actor is a default actor.
+  IsOwned_t ActiveExecutorIsOwned = IsNotOwned;
+
   /// The tracking info that was active when this one was entered.
   ExecutorTrackingInfo *SavedInfo;
 
@@ -88,38 +98,33 @@ public:
   /// Unconditionally initialize a fresh tracking state on the
   /// current state, shadowing any previous tracking state.
   /// leave() must be called beforet the object goes out of scope.
-  void enterAndShadow(ExecutorRef currentExecutor) {
+  void enterAndShadow(ExecutorRef currentExecutor, IsOwned_t isOwned) {
+    assert(!isOwned || currentExecutor.isDefaultActor());
     ActiveExecutor = currentExecutor;
+    ActiveExecutorIsOwned = isOwned;
     SavedInfo = ActiveInfoInThread.get();
     ActiveInfoInThread.set(this);
-  }
-
-  /// Initialize a tracking state on the current thread if there
-  /// isn't one already, or else update the current tracking state.
-  ///
-  /// Returns a pointer to the active tracking info.  If this is the
-  /// same as the object on which this was called, leave() must be
-  /// called before the object goes out of scope.
-  ExecutorTrackingInfo *enterOrUpdate(ExecutorRef currentExecutor) {
-    if (auto activeInfo = ActiveInfoInThread.get()) {
-      activeInfo->ActiveExecutor = currentExecutor;
-      return activeInfo;
-    }
-
-    ActiveExecutor = currentExecutor;
-    SavedInfo = nullptr;
-    ActiveInfoInThread.set(this);
-    return this;
   }
 
   ExecutorRef getActiveExecutor() const {
     return ActiveExecutor;
   }
 
-  void setActiveExecutor(ExecutorRef newExecutor) {
+  void setActiveExecutor(ExecutorRef newExecutor, IsOwned_t isOwned) {
+    assert(!isOwned || newExecutor.isDefaultActor());
     ActiveExecutor = newExecutor;
+    ActiveExecutorIsOwned = isOwned;
   }
 
+  IsOwned_t isActiveExecutorOwned() const {
+    return ActiveExecutorIsOwned;
+  }
+
+  void setActiveExecutorOwned() {
+    assert(ActiveExecutor.isDefaultActor());
+    assert(!ActiveExecutorIsOwned);
+    ActiveExecutorIsOwned = IsOwned;
+  }
 
   bool allowsSwitching() const {
     return AllowsSwitching;
@@ -471,10 +476,11 @@ public:
   bool tryAssumeThread(RunningJobInfo runner);
 
   /// Give up running this actor in the current thread.
-  void giveUpThread(RunningJobInfo runner);
+  void giveUpThread(RunningJobInfo runner, IsOwned_t owned);
 
   /// Claim the next job off the actor or give it up.
-  Job *claimNextJobOrGiveUp(bool actorIsOwned, RunningJobInfo runner);
+  Job *claimNextJobOrGiveUp(bool actorIsRunning, RunningJobInfo runner,
+                            IsOwned_t ownedByTrackingInfo);
 
 private:
   /// Schedule an inline processing job.  This can generally only be
@@ -883,7 +889,8 @@ static Job *preprocessQueue(JobRef first,
   return firstNewJob;
 }
 
-void DefaultActorImpl::giveUpThread(RunningJobInfo runner) {
+void DefaultActorImpl::giveUpThread(RunningJobInfo runner,
+                                    IsOwned_t ownedByTrackingInfo) {
 #if SWIFT_TASK_PRINTF_DEBUG
   fprintf(stderr, "[%p] giving up thread for actor %p\n", pthread_self(), this);
 #endif
@@ -968,6 +975,10 @@ void DefaultActorImpl::giveUpThread(RunningJobInfo runner) {
       }
     }
 
+    // Also balance out any ownership we might have acquired
+    // during execution.
+    if (ownedByTrackingInfo)
+      swift_release(this);
     return;
   }
 }
@@ -977,19 +988,23 @@ void DefaultActorImpl::giveUpThread(RunningJobInfo runner) {
 /// The running thread doesn't need to already own the actor to do this.
 /// It does need to be participating correctly in the ownership
 /// scheme as a "processing job"; see the comment on DefaultActorImpl.
-Job *DefaultActorImpl::claimNextJobOrGiveUp(bool actorIsOwned,
-                                            RunningJobInfo runner) {
+Job *DefaultActorImpl::claimNextJobOrGiveUp(bool actorIsRunning,
+                                            RunningJobInfo runner,
+                                            IsOwned_t ownedByTrackingInfo) {
+  assert((!ownedByTrackingInfo || actorIsRunning) &&
+         "can't be owned by tracking info without being actively run");
+
   auto oldState = CurrentState.load(std::memory_order_acquire);
 
   // The status had better be Running unless we're trying to acquire
   // our first job.
   assert(oldState.Flags.getStatus() == Status::Running ||
-         !actorIsOwned);
+         !actorIsRunning);
 
   // If we don't yet own the actor, we need to try to claim the actor
   // first; we cannot safely access the queue memory yet because other
   // threads may concurrently be trying to do this.
-  if (!actorIsOwned) {
+  if (!actorIsRunning) {
     while (true) {
       // A helper function when the only change we need to try is to
       // update for an inline runner.
@@ -1137,6 +1152,10 @@ Job *DefaultActorImpl::claimNextJobOrGiveUp(bool actorIsOwned,
     if (remainingJobPriority)
       swift_release(this);
 
+    // Also balance any ownership by the current tracking info.
+    if (!jobToRun && ownedByTrackingInfo)
+      swift_release(this);
+
     return jobToRun;
   }
 }
@@ -1151,7 +1170,7 @@ static void swift_job_runImpl(Job *job, ExecutorRef executor) {
   // is generic.
   if (!executor.isGeneric()) trackingInfo.disallowSwitching();
 
-  trackingInfo.enterAndShadow(executor);
+  trackingInfo.enterAndShadow(executor, IsNotOwned);
 
   runJobInEstablishedExecutorContext(job);
 
@@ -1165,7 +1184,8 @@ static void swift_job_runImpl(Job *job, ExecutorRef executor) {
     // Use an underestimated priority; if this means we create an
     // extra processing job in some cases, that's probably okay.
     auto runner = RunningJobInfo::forOther(JobPriority(0));
-    asImpl(currentExecutor.getDefaultActor())->giveUpThread(runner);
+    auto actor = asImpl(currentExecutor.getDefaultActor());
+    actor->giveUpThread(runner, trackingInfo.isActiveExecutorOwned());
   }
 }
 
@@ -1175,23 +1195,20 @@ static void swift_job_runImpl(Job *job, ExecutorRef executor) {
 /// running when code returns back to us until we're not processing
 /// any actors anymore.
 ///
-/// \param currentActor is expected to be passed in as retained to ensure that
-///                     the actor lives for the duration of job execution.
-///                     Note that this may conflict with the retain/release
-///                     design in the DefaultActorImpl, but it does fix bugs!
+/// This takes ownershiip of a retain of the actor.
 static void processDefaultActor(DefaultActorImpl *currentActor,
                                 RunningJobInfo runner) {
 #if SWIFT_TASK_PRINTF_DEBUG
   fprintf(stderr, "[%p] processDefaultActor %p\n", pthread_self(), currentActor);
 #endif
-  DefaultActorImpl *actor = currentActor;
 
   // If we actually have work to do, we'll need to set up tracking info.
   // Optimistically assume that we will; the alternative (an override job
   // took over the actor first) is rare.
   ExecutorTrackingInfo trackingInfo;
   trackingInfo.enterAndShadow(
-    ExecutorRef::forDefaultActor(asAbstract(currentActor)));
+    ExecutorRef::forDefaultActor(asAbstract(currentActor)),
+                              IsNotOwned);
 
   // Remember whether we've already taken over the actor.
   bool threadIsRunningActor = false;
@@ -1205,7 +1222,8 @@ static void processDefaultActor(DefaultActorImpl *currentActor,
     // Try to claim another job from the current actor, taking it over
     // if we haven't already.
     auto job = currentActor->claimNextJobOrGiveUp(threadIsRunningActor,
-                                                  runner);
+                                                  runner,
+                                     trackingInfo.isActiveExecutorOwned());
 
 #if SWIFT_TASK_PRINTF_DEBUG
     fprintf(stderr, "[%p] processDefaultActor %p claimed job %p\n", pthread_self(), currentActor, job);
@@ -1245,12 +1263,12 @@ static void processDefaultActor(DefaultActorImpl *currentActor,
   // Leave the tracking info.
   trackingInfo.leave();
 
+  assert(!trackingInfo.isActiveExecutorOwned() || threadIsRunningActor);
+
   // If we still have an active actor, we should give it up.
   if (threadIsRunningActor && currentActor) {
-    currentActor->giveUpThread(runner);
+    currentActor->giveUpThread(runner, trackingInfo.isActiveExecutorOwned());
   }
-
-  swift_release(actor);
 }
 
 void ProcessInlineJob::process(Job *job) {
@@ -1262,7 +1280,6 @@ void ProcessInlineJob::process(Job *job) {
   auto runner = RunningJobInfo::forInline(targetPriority);
 
   // FIXME: force tail call
-  swift_retain(actor);
   return processDefaultActor(actor, runner);
 }
 
@@ -1278,7 +1295,6 @@ void ProcessOutOfLineJob::process(Job *job) {
   delete self;
 
   // FIXME: force tail call
-  swift_retain(actor);
   return processDefaultActor(actor, runner);
 }
 
@@ -1290,7 +1306,6 @@ void ProcessOverrideJob::process(Job *job) {
   auto runner = RunningJobInfo::forOverride(self);
 
   // FIXME: force tail call
-  swift_retain(actor);
   return processDefaultActor(actor, runner);
 }
 
@@ -1446,11 +1461,12 @@ static bool canGiveUpThreadForSwitch(ExecutorTrackingInfo *trackingInfo,
 /// Note that we don't update DefaultActorProcessingFrame here; we'll
 /// do that in runOnAssumedThread.
 static void giveUpThreadForSwitch(ExecutorRef currentExecutor,
-                                  RunningJobInfo runner) {
+                                  RunningJobInfo runner,
+                                  IsOwned_t owned) {
   if (currentExecutor.isGeneric())
     return;
 
-  asImpl(currentExecutor.getDefaultActor())->giveUpThread(runner);
+  asImpl(currentExecutor.getDefaultActor())->giveUpThread(runner, owned);
 }
 
 /// Try to assume control of the current thread for the given executor
@@ -1485,7 +1501,7 @@ static void runOnAssumedThread(AsyncTask *task, ExecutorRef executor,
   // there and tail-call the task.  We don't want these frames to
   // potentially accumulate linearly.
   if (oldTracking) {
-    oldTracking->setActiveExecutor(executor);
+    oldTracking->setActiveExecutor(executor, IsNotOwned);
 
     // FIXME: force tail call
     return task->runInFullyEstablishedContext();
@@ -1493,7 +1509,7 @@ static void runOnAssumedThread(AsyncTask *task, ExecutorRef executor,
 
   // Otherwise, set up tracking info.
   ExecutorTrackingInfo trackingInfo;
-  trackingInfo.enterAndShadow(executor);
+  trackingInfo.enterAndShadow(executor, IsNotOwned);
 
   // Run the new task.
   task->runInFullyEstablishedContext();
@@ -1511,8 +1527,38 @@ static void runOnAssumedThread(AsyncTask *task, ExecutorRef executor,
   fprintf(stderr, "[%p] leaving assumed thread, current executor is %p\n", pthread_self(), executor.getIdentity());
 #endif
 
-  if (executor.isDefaultActor())
-    asImpl(executor.getDefaultActor())->giveUpThread(runner);
+  if (executor.isDefaultActor()) {
+    auto actor = asImpl(executor.getDefaultActor());
+    actor->giveUpThread(runner, trackingInfo.isActiveExecutorOwned());
+  }
+}
+
+/// When the active task is potentially departing the current thread,
+/// and we're relying on it to keep the current executor alive, there's
+/// a potential race where the task might get resumed and throw away
+/// the last reference to the executor before we can do our future
+/// bookkeeping (giving it up, claiming the next job, etc.).
+/// Ensure that the executor is owned.
+///
+/// This only applies to default actors.  Other executors generally
+/// must ensure that they are retained while running.  Since they
+/// initiate work with swift_job_run, which prevents switching, this
+/// is not a problem.
+///
+/// Note that the departure is merely potential, so we don't want to
+/// actually give up the executor instead of retaining it.
+static void notifyPossibleDeparture(ExecutorTrackingInfo *trackingInfo) {
+  if (!trackingInfo) return;
+
+  auto executor = trackingInfo->getActiveExecutor();
+  if (executor.isDefaultActor() && !trackingInfo->isActiveExecutorOwned()) {
+    swift_retain(asImpl(executor.getDefaultActor()));
+    trackingInfo->setActiveExecutorOwned();
+  }
+}
+
+void swift::_swift_task_notifyPossibleDeparture() {
+  notifyPossibleDeparture(ExecutorTrackingInfo::current());
 }
 
 SWIFT_CC(swiftasync)
@@ -1555,7 +1601,9 @@ static void swift_task_switchImpl(SWIFT_ASYNC_CONTEXT AsyncContext *resumeContex
 #if SWIFT_TASK_PRINTF_DEBUG
     fprintf(stderr, "[%p] switch succeeded, task %p assumed thread for executor %p\n", pthread_self(), task, newExecutor.getIdentity());
 #endif
-    giveUpThreadForSwitch(currentExecutor, runner);
+    auto owned = trackingInfo ? trackingInfo->isActiveExecutorOwned()
+                              : IsNotOwned;
+    giveUpThreadForSwitch(currentExecutor, runner, owned);
     // FIXME: force tail call
     return runOnAssumedThread(task, newExecutor, trackingInfo, runner);
   }
@@ -1565,6 +1613,7 @@ static void swift_task_switchImpl(SWIFT_ASYNC_CONTEXT AsyncContext *resumeContex
 #if SWIFT_TASK_PRINTF_DEBUG
   fprintf(stderr, "[%p] switch failed, task %p enqueued on executor %p\n", pthread_self(), task, newExecutor.getIdentity());
 #endif
+  notifyPossibleDeparture(trackingInfo);
   swift_task_enqueue(task, newExecutor);
 }
 
