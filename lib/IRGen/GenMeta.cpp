@@ -1566,7 +1566,9 @@ namespace {
     }
 
     void addMethod(SILDeclRef fn) {
-      if (!VTable || methodRequiresReifiedVTableEntry(IGM, VTable, fn)) {
+      if (fn.getDecl()->isResilientFinal()) {
+        emitResilientFinalMethod(fn);
+      } else if (!VTable || methodRequiresReifiedVTableEntry(IGM, VTable, fn)) {
         VTableEntries.push_back(fn);
       } else {
         // Emit a stub method descriptor and lookup function for nonoverridden
@@ -1707,6 +1709,13 @@ namespace {
           func->getEffectiveAccess() >= AccessLevel::Public) {
         IGM.emitDispatchThunk(fn);
       }
+    }
+
+    void emitResilientFinalMethod(SILDeclRef fn) {
+      // We emit a dispatch thunk for the function, but not a method
+      // descriptor.
+      if (hasPublicVisibility(fn.getLinkage(NotForDefinition)))
+        IGM.emitDispatchThunk(fn);
     }
     
     void emitNonoverriddenMethod(SILDeclRef fn) {

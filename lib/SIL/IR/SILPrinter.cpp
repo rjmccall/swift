@@ -3242,6 +3242,9 @@ void SILVTableEntry::print(llvm::raw_ostream &OS) const {
   case SILVTable::Entry::Kind::Override:
     OS << " [override]";
     break;
+  case SILVTable::Entry::Kind::ResilientFinal:
+    OS << " [resilient_final]";
+    break;
   }
   if (isNonOverridden()) {
     OS << " [nonoverridden]";

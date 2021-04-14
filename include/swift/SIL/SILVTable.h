@@ -60,6 +60,9 @@ public:
     /// The vtable entry is inherited from the superclass, and overridden
     /// in this class.
     Override,
+    /// No actual vtable entry is required, but the method is
+    /// @_resilientFinal.
+    ResilientFinal,
 
     // Please update the PointerIntPair above if you add/remove enums.
   };

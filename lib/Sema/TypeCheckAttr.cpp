@@ -199,7 +199,9 @@ public:
     }
   }
 
+  void visitFinalCommon(DeclAttribute *attr);
   void visitFinalAttr(FinalAttr *attr);
+  void visitResilientFinalAttr(ResilientFinalAttr *attr);
   void visitIBActionAttr(IBActionAttr *attr);
   void visitIBSegueActionAttr(IBSegueActionAttr *attr);
   void visitLazyAttr(LazyAttr *attr);
@@ -1597,22 +1599,41 @@ void AttributeChecker::visitSwiftNativeObjCRuntimeBaseAttr(
 }
 
 void AttributeChecker::visitFinalAttr(FinalAttr *attr) {
+  visitFinalCommon(attr);
+}
+
+void AttributeChecker::visitResilientFinalAttr(ResilientFinalAttr *attr) {
+  visitFinalCommon(attr);
+}
+
+void AttributeChecker::visitFinalCommon(DeclAttribute *attr) {
+  bool isFinal = isa<FinalAttr>(attr);
+  StringRef attrName = isFinal ? "final" : "@_resilientFinal";
+
   // Reject combining 'final' with 'open'.
   if (auto accessAttr = D->getAttrs().getAttribute<AccessControlAttr>()) {
     if (accessAttr->getAccess() == AccessLevel::Open) {
       diagnose(attr->getLocation(), diag::open_decl_cannot_be_final,
-               D->getDescriptiveKind());
+               D->getDescriptiveKind(), attrName);
       return;
     }
   }
 
+  // Allow `final` on class declarations.
+  // `@_resilientFinal` is currently not allowed on classes;
+  // we diagnose this in the general code.
   if (isa<ClassDecl>(D))
     return;
 
   // 'final' only makes sense in the context of a class declaration.
+  // '@_resilientFinal' only makes sense in the context of the primary
+  // definition of a class.
   // Reject it on global functions, protocols, structs, enums, etc.
-  if (!D->getDeclContext()->getSelfClassDecl()) {
-    diagnose(attr->getLocation(), diag::member_cannot_be_final)
+  if (isFinal ? !D->getDeclContext()->getSelfClassDecl()
+              : !isa<ClassDecl>(D->getDeclContext())) {
+    diagnose(attr->getLocation(),
+             isFinal ? diag::member_cannot_be_final
+                     : diag::member_cannot_be_resilient_final)
       .fixItRemove(attr->getRange());
 
     // Remove the attribute so child declarations are not flagged as final
@@ -1624,7 +1645,9 @@ void AttributeChecker::visitFinalAttr(FinalAttr *attr) {
   // We currently only support final on var/let, func and subscript
   // declarations.
   if (!isa<VarDecl>(D) && !isa<FuncDecl>(D) && !isa<SubscriptDecl>(D)) {
-    diagnose(attr->getLocation(), diag::final_not_allowed_here)
+    diagnose(attr->getLocation(),
+             isFinal ? diag::final_not_allowed_here
+                     : diag::resilient_final_not_allowed_here)
       .fixItRemove(attr->getRange());
     return;
   }
@@ -1634,10 +1657,19 @@ void AttributeChecker::visitFinalAttr(FinalAttr *attr) {
       unsigned Kind = 2;
       if (auto *VD = dyn_cast<VarDecl>(accessor->getStorage()))
         Kind = VD->isLet() ? 1 : 0;
-      diagnose(attr->getLocation(), diag::final_not_on_accessors, Kind)
+      diagnose(attr->getLocation(), diag::final_not_on_accessors,
+               Kind, attrName)
         .fixItRemove(attr->getRange());
       return;
     }
+  }
+
+  // @_resilientFinal cannot be combined with `final`.
+  if (!isFinal && cast<ValueDecl>(D)->isFinal()) {
+    diagnose(attr->getLocation(), diag::resilient_final_and_final,
+             D->getDescriptiveKind())
+      .fixItRemove(attr->getRange());
+    return;
   }
 }
 

@@ -2821,6 +2821,14 @@ bool ValueDecl::isFinal() const {
                            getAttrs().hasAttribute<FinalAttr>());
 }
 
+bool ValueDecl::isResilientFinal() const {
+  if (getAttrs().hasAttribute<ResilientFinalAttr>())
+    return true;
+  if (auto accessor = dyn_cast<AccessorDecl>(this))
+    return accessor->getStorage()->getAttrs().hasAttribute<ResilientFinalAttr>();
+  return false;
+}
+
 bool ValueDecl::isDynamic() const {
   ASTContext &ctx = getASTContext();
   return evaluateOrDefault(ctx.evaluator,

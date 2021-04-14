@@ -2347,6 +2347,9 @@ public:
   /// Is this declaration 'final'?
   bool isFinal() const;
 
+  /// Is this declaration '@_resilientFinal'?
+  bool isResilientFinal() const;
+
   /// Is this declaration marked with 'dynamic'?
   bool isDynamic() const;
 

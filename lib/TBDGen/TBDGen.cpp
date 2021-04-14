@@ -946,6 +946,11 @@ void TBDGenVisitor::visitClassDecl(ClassDecl *CD) {
     void addMethod(SILDeclRef method) {
       assert(method.getDecl()->getDeclContext() == CD);
 
+      if (method.getDecl()->isResilientFinal()) {
+        TBD.addDispatchThunk(method);
+        return;
+      }
+
       if (CD->hasResilientMetadata()) {
         if (FirstTime) {
           FirstTime = false;

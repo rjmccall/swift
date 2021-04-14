@@ -61,6 +61,12 @@ SILGenFunction::~SILGenFunction() {
          "SILGenFunction did not emit throw destination");
 }
 
+MethodDispatch
+SILGenFunction::getMethodDispatch(AbstractFunctionDecl *fn) const {
+  return ::getMethodDispatch(fn, F.getModule().getSwiftModule(),
+                             F.getResilienceExpansion());
+}
+
 //===----------------------------------------------------------------------===//
 // Function emission
 //===----------------------------------------------------------------------===//

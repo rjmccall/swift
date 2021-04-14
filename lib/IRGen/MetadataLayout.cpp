@@ -339,6 +339,10 @@ ClassMetadataLayout::ClassMetadataLayout(IRGenModule &IGM, ClassDecl *decl)
       }
       super::addReifiedVTableEntry(fn);
     }
+
+    void noteResilientFinalMethod(SILDeclRef fn) {
+      noteNonoverriddenMethod(fn);
+    }
     
     void noteNonoverriddenMethod(SILDeclRef fn) {
       if (fn.getDecl()->getDeclContext() == Target) {

@@ -59,8 +59,13 @@ SILGenModule::emitVTableMethod(ClassDecl *theClass,
   // case we won't emit it if building a resilient module.
   SILVTable::Entry::Kind implKind;
   if (baseClass == theClass) {
-    // This is a vtable entry for a method of the immediate class.
-    implKind = SILVTable::Entry::Kind::Normal;
+    if (derivedDecl->isResilientFinal())
+      // This is a record of the existence of a resilient-final method,
+      // but not an actual vtable entry.
+      implKind = SILVTable::Entry::Kind::ResilientFinal;
+    else
+      // This is a vtable entry for a method of the immediate class.
+      implKind = SILVTable::Entry::Kind::Normal;
   } else if (derivedClass == theClass) {
     // This is a vtable entry for a method of a base class, but it is being
     // overridden in the immediate class.

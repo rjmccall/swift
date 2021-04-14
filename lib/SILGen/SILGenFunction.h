@@ -29,6 +29,7 @@
 namespace swift {
 
 class ParameterList;
+enum class MethodDispatch : uint8_t;
 
 namespace Lowering {
 
@@ -495,6 +496,8 @@ public:
   TypeExpansionContext getTypeExpansionContext() const {
     return TypeExpansionContext(getFunction());
   }
+
+  MethodDispatch getMethodDispatch(AbstractFunctionDecl *fn) const;
 
   const TypeLowering &getTypeLowering(AbstractionPattern orig, Type subst) {
     return F.getTypeLowering(orig, subst);

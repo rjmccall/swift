@@ -5798,6 +5798,7 @@ void SILVTable::verify(const SILModule &M) const {
       bool validKind;
       switch (entry.getKind()) {
       case Entry::Normal:
+      case Entry::ResilientFinal:
         validKind = true;
         break;
         
@@ -5822,6 +5823,7 @@ void SILVTable::verify(const SILModule &M) const {
 
       switch (entry.getKind()) {
       case Entry::Normal:
+      case Entry::ResilientFinal:
         assert(!superEntry && "non-root vtable entry must be inherited or override");
         break;
 

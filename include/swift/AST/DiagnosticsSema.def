@@ -2651,7 +2651,8 @@ ERROR(override_mutable_covariant_subscript,none,
 ERROR(static_decl_already_final,none,
       "static declarations are already final", ())
 ERROR(open_decl_cannot_be_final,none,
-      "%0 cannot be declared both 'final' and 'open'", (DescriptiveDeclKind))
+      "%0 cannot be declared both '%1' and 'open'",
+      (DescriptiveDeclKind, StringRef))
 ERROR(implicitly_final_cannot_be_open,none,
       "%select{'let' properties|members of 'final' classes|"
       "static declarations}0 are implicitly 'final'; use 'public' instead of "
@@ -3032,16 +3033,24 @@ ERROR(override_static,none,
       "cannot override %0", (DescriptiveDeclKind))
 
 ERROR(member_cannot_be_final,none,
-      "only classes and class members may be marked with 'final'",
-      ())
+      "only classes and class members may be marked with 'final'", ())
+ERROR(member_cannot_be_resilient_final,none,
+      "only members of a primary class definition may be marked with "
+      "'@_resilientFinal'", ())
 
 ERROR(final_not_allowed_here,none,
       "'final' may only be applied to classes, properties, methods, and "
       "subscripts", ())
+ERROR(resilient_final_not_allowed_here,none,
+      "'@_resilientFinal' may only be applied to properties, methods, and "
+      "subscripts", ())
+ERROR(resilient_final_and_final,none,
+      "%0 cannot be both 'final' and '@_resilientFinal'",
+      (DescriptiveDeclKind))
 
 ERROR(final_not_on_accessors,none,
-      "'final' cannot be applied to accessors, it must be put on the "
-      "%select{var|let|subscript}0", (unsigned))
+      "'%0' cannot be applied to accessors, it must be put on the "
+      "%select{var|let|subscript}0", (unsigned, StringRef))
 
 ERROR(override_rethrows_with_non_rethrows,none,
       "override of 'rethrows' %select{method|initializer}0 should also "

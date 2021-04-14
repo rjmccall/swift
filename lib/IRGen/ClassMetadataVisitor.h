@@ -107,6 +107,7 @@ public:
   /// Notes the existence of a formally virtual method that has been elided from the
   /// reified vtable because it has no overrides.
   void noteNonoverriddenMethod(SILDeclRef method) {}
+  void noteResilientFinalMethod(SILDeclRef method) {}
         
 private:
   /// Add fields associated with the given class and its bases.
@@ -174,8 +175,11 @@ private:
 
   friend SILVTableVisitor<Impl>;
   void addMethod(SILDeclRef declRef) {
+    if (declRef.getDecl()->isResilientFinal()) {
+      asImpl().noteResilientFinalMethod(declRef);
     // Does this method require a reified runtime vtable entry?
-    if (!VTable || methodRequiresReifiedVTableEntry(IGM, VTable, declRef)) {
+    } else if (!VTable ||
+               methodRequiresReifiedVTableEntry(IGM, VTable, declRef)) {
       asImpl().addReifiedVTableEntry(declRef);
     } else {
       asImpl().noteNonoverriddenMethod(declRef);

@@ -52,6 +52,12 @@ class PruneVTables : public SILModuleTransform {
       case SILVTable::Entry::Normal:
       case SILVTable::Entry::Inherited:
         break;
+
+      case SILVTable::Entry::ResilientFinal:
+        LLVM_DEBUG(llvm::dbgs() << "-- entry for ";
+                   entry.getMethod().print(llvm::dbgs());
+                   llvm::dbgs() << " is a resilient final record\n");
+        continue;
           
       case SILVTable::Entry::Override:
         LLVM_DEBUG(llvm::dbgs() << "-- entry for ";

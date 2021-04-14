@@ -4487,53 +4487,43 @@ enum class WitnessDispatchKind {
   Witness
 };
 
-static WitnessDispatchKind getWitnessDispatchKind(SILDeclRef witness,
+static WitnessDispatchKind getWitnessDispatchKind(SILGenModule &SGM,
+                                                  SILDeclRef witness,
                                                   bool isSelfConformance) {
-  auto *decl = witness.getDecl();
+  auto *decl = dyn_cast<AbstractFunctionDecl>(witness.getDecl());
+
+  if (!decl) {
+    assert(isa<EnumElementDecl>(witness.getDecl()));
+    return WitnessDispatchKind::Static;
+  }
 
   if (isSelfConformance) {
     assert(isa<ProtocolDecl>(decl->getDeclContext()));
     return WitnessDispatchKind::Witness;
   }
 
-  ClassDecl *C = decl->getDeclContext()->getSelfClassDecl();
-  if (!C) {
-    return WitnessDispatchKind::Static;
-  }
-
-  // If the witness is dynamic, go through dynamic dispatch.
-  if (decl->shouldUseObjCDispatch()) {
-    // For initializers we still emit a static allocating thunk around
-    // the dynamic initializing entry point.
-    if (witness.kind == SILDeclRef::Kind::Allocator)
-      return WitnessDispatchKind::Static;
-    return WitnessDispatchKind::Dynamic;
-  }
-
-  bool isFinal = (decl->isFinal() || C->isFinal());
-  if (auto fnDecl = dyn_cast<AbstractFunctionDecl>(witness.getDecl()))
-    isFinal |= fnDecl->hasForcedStaticDispatch();
-
-  bool isExtension = isa<ExtensionDecl>(decl->getDeclContext());
-
-  // If we have a final method or a method from an extension that is not
-  // Objective-C, emit a static reference.
-  // A natively ObjC method witness referenced this way will end up going
-  // through its native thunk, which will redispatch the method after doing
-  // bridging just like we want.
-  if (isFinal || isExtension || witness.isForeignToNativeThunk())
+  // Check whether we generally invoke the method.
+  auto dispatch = getMethodDispatch(decl, SGM.M.getSwiftModule(),
+                                    ResilienceExpansion::Maximal);
+  if (dispatch == MethodDispatch::Static)
     return WitnessDispatchKind::Static;
 
+  // If it uses "class dispatch", interpret what that really means.
+
+  // For allocating initializers, we sometimes have to emit a static
+  // allocating thunk even if the initializer itself is dispatched.
+  // Also, non-required initializers can witness a protocol requirement
+  // if the class is final, and we should recognize that here and do
+  // a static dispatch.
   if (witness.kind == SILDeclRef::Kind::Allocator) {
-    // Non-required initializers can witness a protocol requirement if the class
-    // is final, so we can statically dispatch to them.
-    if (!cast<ConstructorDecl>(decl)->isRequired())
-      return WitnessDispatchKind::Static;
-
-    // We emit a static thunk for ObjC allocating constructors.
-    if (decl->hasClangNode())
+    if (decl->shouldUseObjCDispatch() || decl->hasClangNode() ||
+        !cast<ConstructorDecl>(decl)->isRequired())
       return WitnessDispatchKind::Static;
   }
+
+  // Otherwise, if the declaration uses ObjC dispatch, it's dynamic.
+  if (decl->shouldUseObjCDispatch())
+    return WitnessDispatchKind::Dynamic;
 
   // Otherwise emit a class method.
   return WitnessDispatchKind::Class;
@@ -4653,7 +4643,7 @@ void SILGenFunction::emitProtocolWitness(AbstractionPattern reqtOrigTy,
   FullExpr scope(Cleanups, cleanupLoc);
   FormalEvaluationScope formalEvalScope(*this);
 
-  auto witnessKind = getWitnessDispatchKind(witness, isSelfConformance);
+  auto witnessKind = getWitnessDispatchKind(SGM, witness, isSelfConformance);
   auto thunkTy = F.getLoweredFunctionType();
 
   SmallVector<ManagedValue, 8> origParams;

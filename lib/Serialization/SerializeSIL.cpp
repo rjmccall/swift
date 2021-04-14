@@ -76,6 +76,8 @@ static unsigned toStableVTableEntryKind(SILVTable::Entry::Kind kind) {
   case SILVTable::Entry::Kind::Normal: return SIL_VTABLE_ENTRY_NORMAL;
   case SILVTable::Entry::Kind::Inherited: return SIL_VTABLE_ENTRY_INHERITED;
   case SILVTable::Entry::Kind::Override: return SIL_VTABLE_ENTRY_OVERRIDE;
+  case SILVTable::Entry::Kind::ResilientFinal:
+    return SIL_VTABLE_ENTRY_RESILIENT_FINAL;
   }
   llvm_unreachable("bad vtable entry kind");
 }

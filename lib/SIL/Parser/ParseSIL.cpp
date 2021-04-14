@@ -6400,6 +6400,9 @@ bool SILParserState::parseSILVTable(Parser &P) {
         } else if (P.Tok.getText() == "inherited") {
           P.consumeToken();
           Kind = SILVTable::Entry::Kind::Inherited;
+        } else if (P.Tok.getText() == "resilient_final") {
+          P.consumeToken();
+          Kind = SILVTable::Entry::Kind::ResilientFinal;
         } else if (P.Tok.getText() == "nonoverridden") {
           P.consumeToken();
           NonOverridden = true;

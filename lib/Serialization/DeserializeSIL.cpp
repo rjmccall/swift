@@ -81,6 +81,8 @@ fromStableVTableEntryKind(unsigned value) {
   case SIL_VTABLE_ENTRY_NORMAL: return SILVTable::Entry::Kind::Normal;
   case SIL_VTABLE_ENTRY_INHERITED: return SILVTable::Entry::Kind::Inherited;
   case SIL_VTABLE_ENTRY_OVERRIDE: return SILVTable::Entry::Kind::Override;
+  case SIL_VTABLE_ENTRY_RESILIENT_FINAL:
+    return SILVTable::Entry::Kind::ResilientFinal;
   default: return None;
   }
 }

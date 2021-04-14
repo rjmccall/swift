@@ -14,29 +14,56 @@
 //
 //===----------------------------------------------------------------------===//
 
+/// DECL_ATTR is used for declaration atttributes that don't fit into
+/// a more specific category.
+///
+/// The argument SPELLING is the identifier which starts the attribute
+/// (omitting the leading @ if this is a non-contextual attribute).
+///
+/// Expands to nothing if not specified.
 #ifndef DECL_ATTR
 #define DECL_ATTR(SPELLING, CLASS, OPTIONS, CODE)
 #endif
 
+/// CONTEXTUAL_DECL_ATTR is used for declaration attributes that
+/// are spelled with a contextual keyword instead of starting with @.
+///
+/// Defers to DECL_ATTR if not defined.
 #ifndef CONTEXTUAL_DECL_ATTR
 #define CONTEXTUAL_DECL_ATTR(SPELLING, CLASS, OPTIONS, CODE) \
                    DECL_ATTR(SPELLING, CLASS, OPTIONS, CODE)
 #endif
 
+/// SIMPLE_DECL_ATTR is used for declaration attributes that
+/// are spelled with a contextual keyword instead of starting with @.
+///
+/// Defers to DECL_ATTR if not defined.
 #ifndef SIMPLE_DECL_ATTR
 #define SIMPLE_DECL_ATTR(X, CLASS, OPTIONS, CODE) \
                DECL_ATTR(X, CLASS, OPTIONS, CODE)
 #endif
 
+/// CONTEXTUAL_SIMPLE_DECL_ATTR is used for attributes that fit into
+/// both of the categories above.
+///
+/// Defers to SIMPLE_DECL_ATTR if not defined.
 #ifndef CONTEXTUAL_SIMPLE_DECL_ATTR
 #define CONTEXTUAL_SIMPLE_DECL_ATTR(X, CLASS, OPTIONS, CODE) \
                    SIMPLE_DECL_ATTR(X, CLASS, OPTIONS, CODE)
 #endif
 
+/// DECL_ATTR_ALIAS is used to describe spellings that are aliases for
+/// other attributes.
+///
+/// Expands to nothing if not specified.
 #ifndef DECL_ATTR_ALIAS
 #define DECL_ATTR_ALIAS(SPELLING, CLASS)
 #endif
 
+/// CONTEXTUAL_DECL_ATTR_ALIAS is used to describe contextual-keyword
+/// spellings that are aliases for other attributes.
+///
+/// Expands to DECL_ATTR_ALIAS if not specified.
 #ifndef CONTEXTUAL_DECL_ATTR_ALIAS
 #define CONTEXTUAL_DECL_ATTR_ALIAS(SPELLING, CLASS) \
                    DECL_ATTR_ALIAS(SPELLING, CLASS)
@@ -656,6 +683,11 @@ SIMPLE_DECL_ATTR(_inheritActorContext, InheritActorContext,
   OnParam | UserInaccessible |
   ABIStableToAdd | ABIStableToRemove | APIBreakingToAdd | APIBreakingToRemove,
   116)
+
+SIMPLE_DECL_ATTR(_resilientFinal, ResilientFinal,
+  OnFunc | OnAccessor | OnVar | OnSubscript | UserInaccessible |
+  ABIBreakingToAdd | ABIStableToRemove | APIBreakingToAdd | APIStableToRemove,
+  117)
 
 #undef TYPE_ATTR
 #undef DECL_ATTR_ALIAS

@@ -52,7 +52,7 @@ namespace swift {
   class GenericSignature;
 
 /// How a method is dispatched.
-enum class MethodDispatch {
+enum class MethodDispatch : uint8_t {
   // The method implementation can be referenced statically.
   Static,
   // The method implementation uses class_method dispatch.
@@ -60,7 +60,8 @@ enum class MethodDispatch {
 };
 
 /// Get the method dispatch mechanism for a method.
-MethodDispatch getMethodDispatch(AbstractFunctionDecl *method);
+MethodDispatch getMethodDispatch(AbstractFunctionDecl *method,
+                                 ModuleDecl *M, ResilienceExpansion expansion);
 
 /// True if calling the given method or property should use ObjC dispatch.
 bool requiresForeignEntryPoint(ValueDecl *vd);

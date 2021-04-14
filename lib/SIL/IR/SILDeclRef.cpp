@@ -33,7 +33,8 @@ using namespace swift;
 
 /// Get the method dispatch mechanism for a method.
 MethodDispatch
-swift::getMethodDispatch(AbstractFunctionDecl *method) {
+swift::getMethodDispatch(AbstractFunctionDecl *method,
+                         ModuleDecl *M, ResilienceExpansion expansion) {
   // Some methods are forced to be statically dispatched.
   if (method->hasForcedStaticDispatch())
     return MethodDispatch::Static;
@@ -51,6 +52,12 @@ swift::getMethodDispatch(AbstractFunctionDecl *method) {
 
     // Final methods can be statically referenced.
     if (method->isFinal())
+      return MethodDispatch::Static;
+
+    // Resilient-final methods can be statically referenced if we're
+    // within their class's resilience domain.
+    if (method->isResilientFinal() &&
+        !cast<ClassDecl>(dc)->isResilient(M, expansion))
       return MethodDispatch::Static;
 
     // Imported class methods are dynamically dispatched.

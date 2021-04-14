@@ -979,7 +979,10 @@ NeedsNewVTableEntryRequest::evaluate(Evaluator &evaluator,
   
   assert(isa<FuncDecl>(decl) || isa<ConstructorDecl>(decl));
 
-  // Final members are always be called directly.
+  // Final members can always be called directly.
+  // Resilient-final members need to be called through a dispatch
+  // thunk.  That thunk doesn't need to be backed by a real v-table
+  // slot, but we do need to track it similarly.
   // Dynamic methods are always accessed by objc_msgSend().
   if (decl->isFinal() || decl->shouldUseObjCDispatch() || decl->hasClangNode())
     return false;

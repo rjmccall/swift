@@ -1479,6 +1479,7 @@ namespace  {
     UNINTERESTING_ATTR(Override)
     UNINTERESTING_ATTR(RawDocComment)
     UNINTERESTING_ATTR(Required)
+    UNINTERESTING_ATTR(ResilientFinal)
     UNINTERESTING_ATTR(Convenience)
     UNINTERESTING_ATTR(Semantics)
     UNINTERESTING_ATTR(SetterAccess)
@@ -1939,19 +1940,23 @@ static bool checkSingleOverride(ValueDecl *override, ValueDecl *base) {
   }
 
   // The overridden declaration cannot be 'final'.
-  if (base->isFinal() && !isAccessor) {
-    // FIXME: Customize message to the kind of thing.
-    auto baseKind = base->getDescriptiveKind();
-    switch (baseKind) {
-    case DescriptiveDeclKind::StaticProperty:
-    case DescriptiveDeclKind::StaticMethod:
-    case DescriptiveDeclKind::StaticSubscript:
-      override->diagnose(diag::override_static, baseKind);
-      break;
-    default:
-      override->diagnose(diag::override_final,
-                         override->getDescriptiveKind(), baseKind);
-      break;
+  if ((base->isFinal() || base->isResilientFinal()) && !isAccessor) {
+    if (isActorUnownedExecutor()) {
+      override->diagnose(diag::override_implicit_unowned_executor);
+    } else {
+      // FIXME: Customize message to the kind of thing.
+      auto baseKind = base->getDescriptiveKind();
+      switch (baseKind) {
+      case DescriptiveDeclKind::StaticProperty:
+      case DescriptiveDeclKind::StaticMethod:
+      case DescriptiveDeclKind::StaticSubscript:
+        override->diagnose(diag::override_static, baseKind);
+        break;
+      default:
+        override->diagnose(diag::override_final,
+                           override->getDescriptiveKind(), baseKind);
+        break;
+      }
     }
 
     base->diagnose(diag::overridden_here);

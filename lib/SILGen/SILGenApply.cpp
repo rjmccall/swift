@@ -1001,7 +1001,7 @@ public:
     if (e->getAccessSemantics() != AccessSemantics::Ordinary)
       return false;
 
-    if (getMethodDispatch(afd) == MethodDispatch::Static)
+    if (SGF.getMethodDispatch(afd) == MethodDispatch::Static)
       return false;
 
     if (auto ctor = dyn_cast<ConstructorDecl>(afd)) {
@@ -1495,7 +1495,8 @@ public:
     } else if ((useAllocatingCtor || constant.isForeign) &&
                !isSelfCallToReplacedInDynamicReplacement &&
                ((constant.isForeign && !useAllocatingCtor) ||
-                getMethodDispatch(ctorRef->getDecl()) == MethodDispatch::Class)) {
+                SGF.getMethodDispatch(ctorRef->getDecl())
+                  == MethodDispatch::Class)) {
       // Dynamic dispatch to the initializer.
       Scope S(SGF, expr);
       setCallee(Callee::forClassMethod(
@@ -5237,7 +5238,7 @@ static Callee getBaseAccessorFunctionRef(SILGenFunction &SGF,
 
   bool isClassDispatch = false;
   if (!isDirectUse) {
-    switch (getMethodDispatch(decl)) {
+    switch (SGF.getMethodDispatch(decl)) {
     case MethodDispatch::Class:
       isClassDispatch = true;
       break;
