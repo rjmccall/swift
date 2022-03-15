@@ -1451,7 +1451,7 @@ CanType TypeBase::computeCanonicalType() {
   case TypeKind::PackExpansion: {
     auto *expansion = cast<PackExpansionType>(this);
     auto pattern = expansion->getPatternType()->getCanonicalType();
-    Result = PackExpansionType::get(pattern);
+    Result = PackExpansionType::get(pattern, expansion->getReferencedPacks());
     break;
   }
 
@@ -5339,66 +5339,51 @@ case TypeKind::Id:
 
   case TypeKind::PackExpansion: {
     auto expand = cast<PackExpansionType>(base);
-    struct ExpansionGatherer {
-      llvm::function_ref<Optional<Type>(TypeBase *, TypePosition)> baselineFn;
-      llvm::DenseMap<TypeBase *, PackType *> cache;
-      unsigned maxArity;
 
-    public:
-      ExpansionGatherer(
-          llvm::function_ref<Optional<Type>(TypeBase *, TypePosition)>
-              baselineFn)
-          : baselineFn(baselineFn), maxArity(0) {}
-
-      Optional<Type> operator()(TypeBase *input, TypePosition pos) {
-        auto remap = baselineFn(input, pos);
-        if (!remap) {
-          return remap;
-        }
-
-        if (input->is<TypeVariableType>()) {
-          if (auto *PT = (*remap)->getAs<PackType>()) {
-            maxArity = std::max(maxArity, PT->getNumElements());
-            cache.insert({input, PT});
-          }
-        } else if (input->isTypeSequenceParameter()) {
-          if (auto *PT = (*remap)->getAs<PackType>()) {
-            maxArity = std::max(maxArity, PT->getNumElements());
-            cache.insert({input, PT});
-          }
-        }
-        return remap;
-      }
-
-      std::pair<llvm::DenseMap<TypeBase *, PackType *>, unsigned>
-      intoExpansions() && {
-        return std::make_pair(cache, maxArity);
-      }
-    };
-
-    // First, substitute down the pattern type to gather the mapping from
-    // contained substitutable types to packs.
-    auto gather = ExpansionGatherer{fn};
-    Type transformedPat =
-        expand->getPatternType().transformWithPosition(pos, gather);
-    if (!transformedPat)
-      return Type();
-
-    if (transformedPat.getPointer() == expand->getPatternType().getPointer())
-      return *this;
-
+    auto referencedPacks = expand->getReferencedPacks();
     llvm::DenseMap<TypeBase *, PackType *> expansions;
-    unsigned arity;
-    std::tie(expansions, arity) = std::move(gather).intoExpansions();
-    if (expansions.empty()) {
-      // If we didn't find any expansions, either the caller wasn't interested
-      // in expanding this pack, or something has gone wrong. Leave off the
-      // expansion and return the transformed type.
-      return PackExpansionType::get(transformedPat);
+    PackType *lastConcretePack = nullptr;
+    for (auto referencedPack : referencedPacks) {
+      auto remap = fn(referencedPack, TypePosition::Invariant);
+      if (!remap) return Type();
+
+      auto concretePack = (*remap)->getAs<PackType>();
+      if (!concretePack) continue;
+
+      assert(!lastConcretePack ||
+             hasParallelStructure(concretePack, lastConcretePack));
+      lastConcretePack = concretePack;
+
+      expansions.insert({referencedPack.getAsType().getPointer(),
+                         concretePack});
     }
+
+    Type pattern = expand->getPatternType();
+
+    // If we didn't find a substitution for every pack, just rebuild
+    // the pattern type.
+    // FIXME: partial substitutions?  How can we represent these?
+    if (expansions.size() != referencedPacks.size()) {
+      assert(expansions.empty() &&
+             "replaced some but not all referenced packs?");
+
+      Type transformedPattern = pattern.transformWithPosition(pos, fn);
+      if (!transformedPattern)
+        return Type();
+      if (transformedPatern.getPointer() == pattern.getPointer())
+        return *this;
+      return PackExpansionType::get(transformedPattern, referencedPacks);
+    }
+
+    // We're completely assuming that the substitutions have parallel
+    // structure here.
+
+    assert(lastConcretePack);
+    unsigned arity = lastConcretePack->getNumElements();
 
     SmallVector<Type, 8> elts;
     elts.reserve(arity);
+
     // Perform the expansion element-wise according to the maximum arity we
     // picked up during the gather step above.
     //

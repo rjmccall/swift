@@ -453,6 +453,13 @@ protected:
     HasSubstitutionMap : 1
   );
 
+  SWIFT_INLINE_BITFIELD_FULL(PackExpansionType, TypeBase, 32,
+    : NumPadBits,
+
+    /// The number of referenced type packs.
+    NumPacks : 32
+  );
+
   } Bits;
 
 protected:
@@ -6245,6 +6252,45 @@ BEGIN_CAN_TYPE_WRAPPER(PackType, Type)
   }
 END_CAN_TYPE_WRAPPER(PackType, Type)
 
+/// An abstracted reference to a type pack.
+class AnyTypePack {
+  TypeBase *value;
+public:
+  AnyTypePack() : value() {}
+  AnyTypePack(PackType *type) : value(type) {}
+  AnyTypePack(TypeSequenceArchetypeType *type) : value(type) {}
+  AnyTypePack(GenericTypeParamType *type) : value(type) {
+    assert(type->isTypeSequenceParameter());
+  }
+
+  explicit operator bool() const { return (bool) value; }
+
+  /// Is this one of the abstract alternatives, or is it a concrete
+  /// pack?
+  bool isAbstract() const {
+    assert(value && "null pack reference");
+    return !isa<PackType>(value);
+  }
+
+  Type getAsType() const { return value; }
+  PackType *getAsPack() const {
+    return dyn_cast<PackType>(value);
+  }
+  TypeSequenceArchetypeType *getAsArchetype() const {
+    return dyn_cast<TypeSequenceArchetypeType>(value);
+  }
+  GenericTypeParamType *getAsTypeParameter() const {
+    return dyn_cast<GenericTypeParamType>(value);
+  }
+
+  friend bool operator==(AnyTypePack other) {
+    return value == other.value;
+  }
+  friend bool operator!=(AnyTypePack other) {
+    return value != other.value;
+  }
+};
+
 /// PackExpansionType - The interface type of the explicit expansion of a
 /// corresponding set of variadic generic parameters.
 ///
@@ -6261,23 +6307,46 @@ END_CAN_TYPE_WRAPPER(PackType, Type)
 /// the ellipses - \c T in the examples above. This pattern type is the subject
 /// of the expansion of the pack that is tripped when its variadic generic
 /// parameter is substituted for a \c PackType.
-class PackExpansionType : public TypeBase, public llvm::FoldingSetNode {
+class PackExpansionType final : public TypeBase, public llvm::FoldingSetNode,
+    private llvm::TrailingObjects<PackExpansionType, AnyTypePack> {
   friend class ASTContext;
+  friend TrailingObjects;
 
   Type patternType;
+
+  size_t numTrailingObjects(OverloadToken<AnyTypePack>) const {
+    return Bits.PackExpansionType.NumPacks;
+  }
+
+  PackExpansionType(Type patternType, const ASTContext *canonicalContext,
+                    RecursiveTypeProperties properties,
+                    ArrayRef<AnyTypePack> referencedPacks)
+    : TypeBase(TypeKind::PackExpansion, CanCtx, properties),
+               patternType(patternType) {
+    assert(patternType);
+    assert(!referencedPacks.empty());
+
+    Bits.PackExpansionType.NumPacks = referencedPacks.size();
+    memcpy(getTrailingObjects<AnyTypePack>(), referencedPacks.data(),
+           referencedPacks.size() * sizeof(AnyTypePack));
+  }
 
 public:
   /// Create a pack expansion type from the given pattern type.
   ///
   /// It is not required that the pattern type actually contain a reference to
   /// a variadic generic parameter.
-  static PackExpansionType *get(Type pattern);
+  static PackExpansionType *get(Type pattern, ArrayRef<AnyPackType> packs);
 
-public:
   /// Retrieves the pattern type of this pack expansion.
   Type getPatternType() const { return patternType; }
 
-public:
+  /// Retrieves the packs referenced by this expansion.
+  ArrayRef<AnyTypePack> getReferencedPacks() const {
+    return llvm::makeArrayRef(getTrailingObjects<AnyTypePack>(),
+                              Bits.PackExpansionType.NumPacks);
+  }
+
   void Profile(llvm::FoldingSetNodeID &ID) {
     Profile(ID, getPatternType());
   }
@@ -6288,13 +6357,6 @@ public:
   static bool classof(const TypeBase *T) {
     return T->getKind() == TypeKind::PackExpansion;
   }
-
-private:
-  PackExpansionType(Type patternType, const ASTContext *CanCtx)
-    : TypeBase(TypeKind::PackExpansion, CanCtx,
-               patternType->getRecursiveProperties()), patternType(patternType) {
-      assert(patternType);
-    }
 };
 BEGIN_CAN_TYPE_WRAPPER(PackExpansionType, Type)
   CanType getPatternType() const {

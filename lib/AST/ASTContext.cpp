@@ -2952,15 +2952,80 @@ Type TupleTypeElt::getType() const {
   return ElementType;
 }
 
-PackExpansionType *PackExpansionType::get(Type patternTy) {
-  assert(patternTy && "Missing pattern type in expansion");
+#ifndef NDEBUG
+static bool allReferencedPacksAreIncluded(Type patternTy,
+                                          ArrayRef<AnyTypePack> packs) {
+  struct Walker : TypeWalker {
+    ArrayRef<AnyTypePack> packs;
+    Action walkToTypePre(Type ty) override {
+      // We're looking for "open" references, but the references in
+      // PackExpansionType are "closed" (we have substitutions for them).
+      // If PET can ever represent a substitution to a concrete pack,
+      // we'll need to visit the componenst of those packss.
+      if (isa<PackExpansionType>(ty.getPointer()))
+        return Action::SkipChildren;
 
+      if (auto packRef = AnyTypePack::isa(ty)) {
+        for (auto presentRef : packs)
+          if (packRef == presentRef)
+            return Action::Continue;
+      }
+
+      return Action::Stop;
+    }
+  };
+
+  // If we ever hit Stop above, we're in trouble.
+  return !patternTy.walk(Walker{packs});
+}
+#endif
+
+static ArrayRef<AnyTypePack>
+canonicalizeReferencedPacks(ArrayRef<AnyTypePack> packs,
+                            SmallVectorImpl<AnyTypePack> buffer) {
+  auto comparator = [](AnyTypePack lhs, AnyTypePack rhs) {
+    return std::less(lhs.getAsType().getPointer(),
+                     rhs.getAsType().getPointer());
+  };
+
+  if (is_sorted_and_unique(packs.begin(), packs.end(), comparator))
+    return packs;
+
+  assert(buffer.empty());
+  buffer.append(packs.begin(), packs.end());
+  sortUnique(buffer, comparator);
+  return buffer;
+}
+
+PackExpansionType *
+PackExpansionType::get(Type patternTy, ArrayRef<AnyTypePack> packs) {
+  assert(patternTy && "Missing pattern type in expansion");
+  assert(!packs.empty());
+  assert(allReferencedPacksAreIncluded(patternTy, packs));
+
+  SmallVector<AnyTypePack> packsBuffer;
+  packs = canonicalizeReferencedPacks(packs, packsBuffer);
+
+#ifndef NDEBUG
+  for (auto pack : packs)
+    assert(pack.isAbstract() &&
+           "cannot currently represent expansions over concrete packs");
+#endif
+
+  // This computation might need to change if we ever support
+  // expansions over concrete packs; we might end up with type
+  // variables in the pattern that have been substituted with a
+  // concrete pack.  Or maybe we need a way to write that which
+  // doesn't set type properties.
   auto properties = patternTy->getRecursiveProperties();
+  for (auto pack : packs)
+    properties |= packs.getAsType()->getRecursiveProperties();
+
   auto arena = getArena(properties);
 
   auto &context = patternTy->getASTContext();
   llvm::FoldingSetNodeID id;
-  PackExpansionType::Profile(id, patternTy);
+  PackExpansionType::Profile(id, patternTy, packs);
 
   void *insertPos;
   if (PackExpansionType *expType =
@@ -2970,15 +3035,22 @@ PackExpansionType *PackExpansionType::get(Type patternTy) {
     return expType;
 
   const ASTContext *canCtx = patternTy->isCanonical() ? &context : nullptr;
-  PackExpansionType *expansionTy = new (context, AllocationArena::Permanent)
-      PackExpansionType(patternTy, canCtx);
+
+  size_t bytes = totalSizeToAlloc<AnyTypePack>(packs.size());
+  void *mem = C.Allocate(bytes, alignof(PackExpansionType), arena);
+  PackExpansionType *expansionTy =
+    new (mem) PackExpansionType(patternTy, canCtx, properties, packs);
   context.getImpl().getArena(arena).PackExpansionTypes.InsertNode(expansionTy,
                                                                   insertPos);
   return expansionTy;
 }
 
-void PackExpansionType::Profile(llvm::FoldingSetNodeID &ID, Type patternType) {
+void PackExpansionType::Profile(llvm::FoldingSetNodeID &ID,
+                                Type patternType,
+                                ArrayRef<AnyTypePack> packs) {
   ID.AddPointer(patternType.getPointer());
+  for (auto pack : packs)
+    ID.AddPointer(pack.getAsType().getPointer());
 }
 
 PackType *PackType::getEmpty(const ASTContext &C) {

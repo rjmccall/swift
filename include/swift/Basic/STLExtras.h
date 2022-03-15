@@ -603,10 +603,9 @@ void sortUnique(
 
 /// Returns true if [II, IE) is a sorted and uniqued array. Returns false
 /// otherwise.
-template <typename IterTy>
-inline bool is_sorted_and_uniqued(IterTy II, IterTy IE) {
-  using RefTy = typename std::iterator_traits<IterTy>::reference;
-
+template <typename IterTy, typename Comparator>
+inline bool is_sorted_and_uniqued(IterTy II, IterTy IE,
+                                  Comparator &&comparator) {
   // The empty list is always sorted and uniqued.
   if (II == IE)
     return true;
@@ -622,7 +621,7 @@ inline bool is_sorted_and_uniqued(IterTy II, IterTy IE) {
     // If LastI is greater than II then we know that our array is not sorted. If
     // LastI equals II, then we know that our array is not unique. If both of
     // those are conditions are false, then visit the next iterator element.
-    if (std::greater_equal<RefTy>()(*LastI, *II)) {
+    if (!comparator(*LastI, *II)) {
       // Return false otherwise.
       return false;
     }
@@ -633,6 +632,12 @@ inline bool is_sorted_and_uniqued(IterTy II, IterTy IE) {
 
   // Success!
   return true;
+}
+
+template <typename IterTy>
+inline bool is_sorted_and_uniqued(IterTy II, IterTy IE) {
+  using RefTy = typename std::iterator_traits<IterTy>::reference;
+  return is_sorted_and_uniqued(II, IE, std::less<RefTy>());
 }
 
 template <typename Container>
