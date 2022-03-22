@@ -441,6 +441,17 @@ public:
                            bDescription->getProtocol());
   }
 
+  static llvm::hash_code hashProtocolConformanceDescriptor(
+      const ProtocolConformanceDescriptor *description) {
+    if (!description->isSynthesizedNonUnique()) {
+      return llvm::hash_value(description);
+    } else if (auto metadata = description->getCanonicalTypeMetadata()) {
+      return llvm::hash_value(metadata);
+    } else {
+      return llvm::hash_value(description->getProtocol());
+    }
+  }
+
 private:
   /// Compare the content from two keys.
   static int compareContent(const void * const *adata,

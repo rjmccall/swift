@@ -720,6 +720,10 @@ bool isFunctionAttr(Node::Kind kind);
 /// contain symbolic references.
 llvm::StringRef makeSymbolicMangledNameStringRef(const char *base);
 
+/// Compare two symbolic names.  The ordering is arbitrary.
+int compareSymbolicMangledNames(const char *lhs, const char *rhs,
+                                );
+
 SWIFT_END_INLINE_NAMESPACE
 } // end namespace Demangle
 } // end namespace swift

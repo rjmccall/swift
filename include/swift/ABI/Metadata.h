@@ -2154,7 +2154,14 @@ enum class ExistentialTypeRepresentation {
   Error,
 };
 
-/// The structure of existential type metadata.
+/// The structure of type metadata for simple existential types which
+/// don't require an extended existential descriptor:
+///
+/// - They are existential over a single type T.
+/// - Their head type is that type T.
+/// - Their existential constraints are a composition of protocol
+///   requirements, superclass constraints, and possibly a class
+///   layout constraint on T.
 template <typename Runtime>
 struct TargetExistentialTypeMetadata
   : TargetMetadata<Runtime>,
@@ -2271,6 +2278,223 @@ public:
 };
 using ExistentialTypeMetadata
   = TargetExistentialTypeMetadata<InProcess>;
+
+/// A description of the shape of an existential type.  Only
+/// particularly complex types have an existential descriptor.
+///
+/// An existential type has the general form:
+///   \exists <signature> . <type>
+///
+/// The signature is called the requirement signature.  In the most
+/// common case (the only one Swift currently supports), it has exactly
+/// one type parameter.  The types and conformances required by this
+/// signature must be stored in the existential container at runtime.
+///
+/// The type is called the head type, and it is expressed in terms of
+/// the type parameters introduced by the requirement signature.  It is
+/// required to name each of the type parameters in an identity
+/// position (outside of the base type of a member type expression).
+/// In the most common case, it is the unique type parameter type.
+/// Swift currently only supports head types that are either the type
+/// parameter or a metatype thereof (possibly multiply-derived).
+///
+/// In order to efficiently support generic substitution of the
+/// constraints of existential types, extended existential type
+/// descriptors represent a generalizable form of the existential:
+///   \forall <gen sig> . \exists <req sig> . <type>
+///
+/// The new signature is called the generalization signature of the
+/// shape.  All concrete references to types within the requirement
+/// signature and head type which are not expressed in terms of
+/// the requirement signature are replaced with type parameters freshly
+/// added to the generalization signature.  Any given existential type
+/// is then a specialization of this generalization.
+///
+/// For example, the existential type
+///   \exists <T: Collection where T.Element == Int> . T
+/// is generalized as
+///   \forall <U> . \exists <T: Collection where T.Element == U> . T
+/// and is the application of this generalization at <Int>.
+///
+/// The soundness condition on this is that the generalization
+/// signatures, requirement signatures, and head types must be
+/// identical for any two existential types for which a generic
+/// substitution can carry one to the other.
+///
+/// ExistentialTypeMetadata can be thought of as inlining the
+/// simplest cases of existential shapes directly into the metadata.
+/// Types which *can* be represented with ExistentialTypeMetadata
+/// *must* be represented with it.
+template <typename Runtime>
+struct TargetExtendedExistentialTypeDescriptor
+  : swift::ABI::TrailingObjects<
+      TargetExtendedExistentialTypeDescriptor<Runtime>,
+      GenericParamDescriptor,
+      TargetGenericRequirementDescriptor<Runtime>>> {
+private:
+  using TrailingObjects =
+    swift::ABI::TrailingObjects<
+      TargetExtendedExistentialTypeDescriptor<Runtime>,
+      GenericParamDescriptor,
+      TargetGenericRequirementDescriptor<Runtime>>>;
+  friend TrailingObjects;
+
+  template<typename T>
+  using OverloadToken = typename TrailingObjects::template OverloadToken<T>;
+
+  size_t numTrailingObjects(OverloadToken<GenericParamDescriptor>) const {
+    return GenSigHeader.getNumParameters()
+         + ReqSigHeader.getNumParameters();
+  }
+
+  size_t numTrailingObjects(OverloadToken<GenericRequirementDescriptor>) const {
+    return GenSigHeader.NumRequirements
+         + ReqSigHeader.NumRequirements;
+  }
+
+public:
+  /// Flags for the existential shape.  These flags are generally
+  /// not considered to be part of the identity of the shape and are not
+  /// hashed.
+  ExtendedExistentialTypeFlags Flags;
+
+  /// The header describing the generalization signature.
+  TargetGenericContextDescriptorHeader<Runtime> GenSigHeader;
+
+  /// The header describing the requirement signature.
+  TargetGenericContextDescriptorHeader<Runtime> ReqSigHeader;
+
+  /// The head type of the existential, as a mangled type string.
+  /// Null if the header is just the (presumed single) requirement
+  /// type parameter; this is assumed canonically, so heads must
+  /// be simplified this way.
+  TargetRelativeDirectPointer<const char, /*nullable*/ true> HeadType;
+
+  bool isHeadTypeOpaque() const {
+    return HeadType.isNull();
+  }
+
+  /// Return the amount of space used in the existential container
+  /// for storing the existential arguments (including both the
+  /// type metadata and the conformances).
+  unsigned getContainerSignatureLayoutSizeInWords() const {
+    return ReqSigHeader.getArgumentLayoutSizeInWords();
+  }
+
+  /// Return the amount of space used in the
+  /// ExtendedExistentialMetadata to store the generalization
+  /// arguments (including both type metadata and any conformances).
+  unsigned getGeneralizationSignatureLayoutSizeInWords() const {
+    return GenSigHeader.getArgumentLayoutSizeInWords();
+  }
+};
+using ExtendedExistentialTypeDescriptor
+  = TargetExtendedExistentialTypeDescriptor<InProcess>;
+
+/// A hash which is guaranteed (ignoring a weakness in the
+/// selected cryptographic hash algorithm) to be unique for the
+/// source string.  Cryptographic hashing is reasonable to use
+/// for certain kinds of complex uniquing performed by the
+/// runtime when the representation being uniqued would otherwise
+/// be prohibitively difficult to hash and compare, such as a
+/// generic signature.
+///
+/// The hash is expected to be computed at compile time and simply
+/// trusted at runtime.  We are therefore not concerned about
+/// malicious collisions: an attacker would have to control the
+/// program text, and there is nothing they can accomplish from a
+/// hash collision that they couldn't do more easily by just changing
+/// the program to do what they want.  We just want a hash with
+/// minimal chance of a birthday-problem collision.  As long as
+/// we use a cryptographic hash algorithm, a 64-bit hash should do
+/// this just fine, since the number of objects being uniqued
+/// will be far less than 2^32.  And we are sensitive about the
+/// size of these objects.
+///
+/// We'd like to use BLAKE3 for this, but pending acceptance of
+/// that into LLVM, we're using SHA-256.
+struct UniqueHash {
+  static_assert(NumBytes_UniqueHash % sizeof(uint32_t) == 0,
+                "NumBytes_UniqueHash not a multiple of 4");
+  enum { NumChunks = NumBytes_UniqueHash / sizeof(uint32_t) };
+
+  uint32_t Data[NumChunks];
+
+  friend bool operator==(const UniqueHash &lhs, const UniqueHash &rhs) {
+    for (unsigned i = 0; i != NumChunks; ++i)
+      if (lhs.Data[i] != rhs.Data[i])
+        return false;
+    return true;
+  }
+
+  friend uint32_t hash_value(const UniqueHash &hash) {
+    // It's a cryptographic hash, so there's no point in merging
+    // hash data from multiple chunks.
+    return Data[0];
+  }
+};
+
+template <typename Runtime>
+struct TargetNonUniqueExtendedExistentialTypeDescriptor {
+  /// A reference to memory that can be used to cache a globally-unique
+  /// descriptor for this existential shape.
+  TargetRelativeDirectPointer<Runtime,
+    std::atomic<ExtendedExistentialTypeDescriptor*>> UniqueCache;
+
+  /// A hash of the mangling of the existential shape.
+  ///
+  /// TODO: describe that mangling here
+  UniqueHash Hash;
+
+  /// The local copy of the existential shape descriptor.
+  TargetExtendedExistentialTypeDescriptor<Runtime> LocalCopy;
+};
+using NonUniqueExtendedExistentialTypeDescriptor
+  = TargetNonUniqueExtendedExistentialTypeDescriptor<InProcess>;
+
+/// The structure of type metadata for existential types which require
+/// an extended existential descriptor.
+///
+/// An extended existential type metadata is a concrete application of
+/// an extended existential descriptor to its generalization arguments,
+/// which there may be none of.  See ExtendedExistentialDescriptor.
+template <typename Runtime>
+struct TargetExtendedExistentialTypeMetadata
+  : TargetMetadata<Runtime>,
+    swift::ABI::TrailingObjects<
+      TargetExtendedExistentialTypeMetadata<Runtime>,
+      ConstTargetPointer<Runtime, void> {
+private:
+  using TrailingObjects =
+    swift::ABI::TrailingObjects<
+      TargetExtendedExistentialTypeMetadata<Runtime>,
+      ConstTargetPointer<Runtime, void>>;
+  friend TrailingObjects;
+
+  template<typename T>
+  using OverloadToken = typename TrailingObjects::template OverloadToken<T>;
+
+  size_t numTrailingObjects(OverloadToken<ConstTargetPointer<Runtime, void>>) const {
+    return Shape->getGeneralizationArgumentSizeInWords();
+  }
+
+public:
+  explicit constexpr
+  TargetExtendedExistentialTypeMetadata(
+                            ExtendedExistentialTypeDescriptor *shape)
+    : TargetMetadata<Runtime>(MetadataKind::ExtendedExistential),
+      Shape(shape) {}
+
+  TargetSignedPointer<Runtime, ExtendedExistentialTypeDescriptor *
+                                   __ptrauth_swift_extended_existential_type_descriptor>
+    Shape;
+
+  ConstTargetPointer<Runtime, void> const *getGeneralizationArguments() const {
+    return getTrailingObjects<ConstTargetPointer<Runtime, void>>();
+  }
+};
+using ExtendedExistentialTypeMetadata
+  = TargetExtendedExistentialTypeMetadata<InProcess>;
 
 /// The basic layout of an existential metatype type.
 template <typename Runtime>
@@ -2970,10 +3194,58 @@ TargetContextDescriptor<Runtime>::getModuleContext() const {
 
 template<typename Runtime>
 struct TargetGenericContextDescriptorHeader {
-  uint16_t NumParams, NumRequirements, NumKeyArguments, NumExtraArguments;
+  /// The number of (source-written) generic parameters, and thus
+  /// the number of GenericParamDescriptors associated with this
+  /// context.  The parameter descriptors appear in the order in
+  /// which they were given in the source.
+  ///
+  /// A GenericParamDescriptor corresponds to a type metadata pointer
+  /// in the arguments layout when isKeyArgument() is true.
+  /// isKeyArgument() will be false if the parameter has been unified
+  /// unified with a different parameter or an associated type.
+  uint16_t NumParams;
+
+  /// The number of GenericRequirementDescriptors in this generic
+  /// signature.
+  ///
+  /// A GenericRequirementDescriptor of kind Protocol corresponds
+  /// to a witness table pointer in the arguments layout when
+  /// isKeyArgument() is true.  isKeyArgument() will be false if
+  /// the protocol is an Objective-C protocol.  (Unlike generic
+  /// parameters, redundant conformance requirements can simply be
+  /// eliminated, and so that case is not impossible.)
+  uint16_t NumRequirements;
+
+  /// The size of the "key" area of the argument layout, in words.
+  /// Key arguments include generic parameters and conformance
+  /// requirements which are part of the identity of the context.
+  ///
+  /// The key area of the argument layout considers of a sequence
+  /// of type metadata pointers (in the same order as the parameter
+  /// descriptors, for those parameters which satisfy hasKeyArgument())
+  /// followed by a sequence of witness table pointers (in the same
+  /// order as the requirements, for those requirements which satisfy
+  /// hasKeyArgument()).
+  uint16_t NumKeyArguments;
+
+  /// In principle, the size of the "extra" area of the argument
+  /// layout, in words.  The idea was that extra arguments would
+  /// include generic parameters and conformances that are not part
+  /// of the identity of the context; however, it's unclear why we
+  /// would ever want such a thing.  As a result, this section is
+  /// unused, and this field is always zero.  It can be repurposed
+  /// as long as it remains zero in code which must be compatible
+  /// with existing Swift runtimes.
+  uint16_t NumExtraArguments;
   
   uint32_t getNumArguments() const {
     return NumKeyArguments + NumExtraArguments;
+  }
+
+  /// Return the total size of the argument layout, in words.
+  /// The alignment of the argument layout is the word alignment.
+  uint32_t getArgumentLayoutSizeInWords() const {
+    return getNumArguments();
   }
 
   bool hasArguments() const {
@@ -3029,6 +3301,10 @@ public:
     return swift::Demangle::makeSymbolicMangledNameStringRef(Param.get());
   }
 
+  size_t getParamHash() const {
+    return swift::Demangle::hashSymbolicMangledName(Param.get());
+  }
+
   /// Retrieve the protocol for a Protocol requirement.
   TargetProtocolDescriptorRef<Runtime> getProtocol() const {
     assert(getKind() == GenericRequirementKind::Protocol);
@@ -3040,6 +3316,12 @@ public:
     assert(getKind() == GenericRequirementKind::SameType ||
            getKind() == GenericRequirementKind::BaseClass);
     return swift::Demangle::makeSymbolicMangledNameStringRef(Type.get());
+  }
+
+  llvm::hash_code getMangledTypeNameHash() const {
+    assert(getKind() == GenericRequirementKind::SameType ||
+           getKind() == GenericRequirementKind::BaseClass);
+    return swift::Demangle::hashSymbolicMangledName(Type.get());
   }
 
   /// Retrieve the protocol conformance record for a SameConformance
@@ -3069,6 +3351,34 @@ public:
     }
 
     return false;
+  }
+
+  friend llvm::hash_code
+  hash_value(const TargetGenericRequirementDescriptor<Runtime> &reqt) {
+    auto hash = llvm::hash_combine(reqt.Flags.getIntValue(),
+                                   reqt.getParamHash());
+    switch (reqt.getKind()) {
+    case GenericRequirementKind::BaseClass:
+    case GenericRequirementKind::SameType: {
+      return llvm::hash_combine(hash, reqt.getMangledTypeNameHash());
+    }
+
+    case GenericRequirementKind::SameConformance: {
+      return llvm::hash_combine(hash,
+        MetadataCacheKey::hashProtocolConformance(reqt.getConformance()));
+    }
+
+    case GenericRequirementKind::Layout: {
+      auto layout = reqt.getLayout();
+      return llvm::hash_combine(hash, layout);
+    }
+
+    case GenericRequirementKind::Protocol: {
+      auto protocol = reqt.getProtocol();
+      return llvm::hash_combine(hash, protocol);
+    }
+    }
+    swift_unreachable("unknown requirement kind");
   }
 };
 using GenericRequirementDescriptor =

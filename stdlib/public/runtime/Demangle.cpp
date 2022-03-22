@@ -744,3 +744,13 @@ char *swift_demangle(const char *mangledName,
 
   return outputBuffer;
 }
+
+/// Hash a symbolic mangled name.
+size_t swift::_swift_hashSymbolicMangledName(const char *base) {
+
+}
+
+/// Compare two symbolic mangled names.
+size_t swift::_swift_hashSymbolicMangledName(const char *base) {
+
+}

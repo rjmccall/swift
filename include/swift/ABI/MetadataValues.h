@@ -55,6 +55,9 @@ enum {
 
   /// The number of words in an AsyncLet (flags + child task context & allocation)
   NumWords_AsyncLet = 80, // 640 bytes ought to be enough for anyone
+
+  /// The size of a unique hash.
+  NumBytes_UniqueHash = 8,
 };
 
 struct InProcess;
@@ -786,6 +789,97 @@ public:
   }
 };
 
+/// Flags in an extended existential type descriptor.
+class ExtendedExistentialTypeFlags {
+public:
+  typedef uint32_t int_type;
+
+  /// Special cases for the representation.
+  enum class SpecialKind {
+    None = 0,
+
+    /// The existential has a class constraint.
+    /// The inline storage is sizeof(void*) / alignof(void*),
+    /// the value is always stored inline, the value is reference-
+    /// counted (using unknown reference counting), and the
+    /// type metadata for the requirement generic parameters are
+    /// not stored in the existential container because they can
+    /// be recovered from the instance type of the class.
+    Class = 1,
+
+    /// The existential has a metatype constraint.
+    /// The inline storage is sizeof(void*) / alignof(void*),
+    /// the value is always stored inline, the value is a Metadata*,
+    /// and the type metadata for the requirement generic parameters
+    /// are not stored in the existential container because they can
+    /// be recovered from the stored metatype.
+    Metatype = 2,
+
+    // 15 is the maximum
+  };
+
+private:
+  enum : int_type {
+    InlineStorageSizeMask       = 0x0000FFFFU,
+    InlineStorageAlignMaskMask  = 0x00FF0000U,
+    InlineStorageAlignMaskShift = 16,
+    SpecialKindMask             = 0x0F000000U,
+    SpecialKindShift            = 24,
+    ValueIsAlwaysInlineMask     = 0x10000000U,
+  };
+  int_type Data;
+
+public:
+  constexpr ExtendedExistentialTypeFlags(int_type Data) : Data(Data) {}
+  constexpr ExtendedExistentialTypeFlags(size_t size, size_t alignMask)
+    : Data((size & ValueSizeMask) |
+           (alignMask << ValueAlignmentMaskShift)) {}
+  constexpr ExtendedExistentialTypeFlags
+  withValueIsAlwaysInline(bool isInline) const {
+    return ExtendedExistentialTypeFlags(
+      isInline ? (Data | ValueIsAlwaysInlineMask)
+               : (Data & ~ValueIsAlwaysInlineMask));
+  }
+  constexpr ExtendedExistentialTypeFlags
+  withSpecialKind(SpecialKind kind) const {
+    return ExtendedExistentialTypeFlags(
+      (Data & ~SpecialKindMask) | (int_type(kind) << SpecialKindShift));
+  }
+
+  /// Return the size of the inline value storage.  This does not include
+  /// the storage for the requirement signature arguments.
+  size_t getInlineStorageSize() const {
+    return Data & InlineStorageSizeMask;
+  }
+
+  /// Return the alignment mask of the inline value storage.
+  size_t getInlineStorageAlignMask() const {
+    return (Data & InlineStorageAlignMaskMask) >> InlineStorageAlignMaskShift;
+  }
+
+  /// Are values guaranteed to be stored inline in the inline
+  /// value storage?
+  bool areValuesAlwaysInline() const {
+    return (Data & ValueIsAlwaysInlineMask);
+  }
+  
+  /// Is this a special kind of existential?
+  SpecialKind getSpecialKind() const {
+    return SpecialKind((Data & SpecialKindMask) >> SpecialKindShift);
+  }
+
+  bool isClassConstrained() const {
+    return getSpecialKind() == SpecialKind::Class;
+  }
+  bool isMetatypeConstrained() const {
+    return getSpecialKind() == SpecialKind::Metatype;
+  }
+
+  int_type getIntValue() const {
+    return Data;
+  }
+};
+
 /// Convention values for function type metadata.
 enum class FunctionMetadataConvention: uint8_t {
   Swift = 0,
@@ -1190,6 +1284,9 @@ namespace SpecialPointerAuthDiscriminators {
 
   /// Protocol conformance descriptors.
   const uint16_t ProtocolConformanceDescriptor = 0xc6eb;
+
+  /// Extended existential shape descriptors.
+  const uint16_t ExtendedExistentialDescriptor = 0x3d34; // = 15668
 
   /// Value witness functions.
   const uint16_t InitializeBufferWithCopyOfBuffer = 0xda4a;

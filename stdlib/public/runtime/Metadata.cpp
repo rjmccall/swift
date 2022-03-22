@@ -362,6 +362,26 @@ namespace {
   };
 } // end anonymous namespace
 
+static unsigned getNumKeyParameters(ArrayRef<GenericParamDescriptor> params) {
+  unsigned count = 0;
+  for (const auto &gp : params) {
+    if (gp.hasKeyArgument())
+      ++count;
+  }
+  return count;
+}
+
+static unsigned
+getNumKeyWitenssTables(ArrayRef<GenericRequirementDescriptor> reqts) {
+  unsigned count = 0;
+  for (const auto &reqt : reqts) {
+    if (reqt.Flags.hasKeyArgument() &&
+        reqt.getKind() == GenericRequirementKind::Protocol)
+      ++count;
+  }
+  return count;
+}
+
 namespace {
   class GenericMetadataCache :
     public MetadataCache<GenericCacheEntry, GenericMetadataCacheTag> {
@@ -370,21 +390,10 @@ namespace {
     uint16_t NumWitnessTables;
 
     GenericMetadataCache(const TargetGenericContext<InProcess> &genericContext)
-        : NumKeyParameters(0), NumWitnessTables(0) {
-      // Count up the # of key parameters and # of witness tables.
-
-      // Find key generic parameters.
-      for (const auto &gp : genericContext.getGenericParams()) {
-        if (gp.hasKeyArgument())
-          ++NumKeyParameters;
-      }
-
-      // Find witness tables.
-      for (const auto &req : genericContext.getGenericRequirements()) {
-        if (req.Flags.hasKeyArgument() &&
-            req.getKind() == GenericRequirementKind::Protocol)
-          ++NumWitnessTables;
-      }
+      : NumKeyParameters(
+          getNumKeyParameters(genericContext.getGenericParams())),
+        NumWitnessTables(
+          getNumKeyWitnessTables(genericContext.getGenericRequirements())) {
     }
   };
 
@@ -4175,6 +4184,311 @@ OpaqueValue *swift::swift_assignExistentialWithCopy(OpaqueValue *dest,
                                            /*known allocated*/ true>;
   return Witnesses::assignWithCopy(dest, const_cast<OpaqueValue*>(src), type);
 }
+
+/***************************************************************************/
+/*** Extended existential type descriptors *********************************/
+/***************************************************************************/
+
+namespace {
+
+class ExtendedExistentialTypeDescriptorCacheEntry {
+public:
+  const ExtendedExistentialTypeDescriptor *
+    __ptrauth_swift_extended_existential_type_descriptor Data;
+
+  struct Key {
+    const ExtendedExistentialTypeDescriptor *Candidate;
+
+    friend llvm::hash_code hash_value(const Key &key) {
+      const ExtendedExistentialTypeDescriptor &candidate = *key.Candidate;
+
+      auto hash == llvm::hash_combine(candidate.Flags.getIntValue(),
+                                      candidate.GenSigHeader.NumParams,
+                                      candidate.GenSigHeader.NumRequirements,
+                                      candidate.ReqSigHeader.NumParams,
+                                      candidate.ReqSigHeader.NumRequirements);
+
+      for (auto param : candidate.getAllParams()) {
+        hash = llvm::hash_combine(hash, param.getIntValue());
+      }
+
+      for (auto reqt : candidate.getAllRequirements()) {
+        hash = llvm::hash_combine(hash, reqt);
+      }
+    }
+  };
+
+  ExtendedExistentialTypeDescriptorCacheEntry(Key key)
+    : Data(key.Candidate) {}
+
+  intptr_t getKeyIntValueForDump() {
+    return 0;
+  }
+
+  bool matchesKey(Key key) const {
+    auto self = Data;
+    auto other = key.Candidate;
+    if (self == other) return true;
+
+    if (self->Flags != other.Flags ||
+        self->isTypeHeadOpaque() != other->isTypeHeadOpaque() ||
+        self->GenSigHeader.NumParams != other->GenSigHeader.NumParams ||
+        self->GenSigHeader.NumRequirements != other->GenSigHeader.NumRequirements ||
+        self->ReqSigHeader.NumParams != other->ReqSigHeader.NumParams ||
+        self->ReqSigHeader.NumRequirements != other->ReqSigHeader.NumRequirements)
+      return false;
+
+    if (!self->isTypeHeadOpaque()) {
+      auto selfHead = self.HeadType.get();
+      auto otherHead = other.HeadType.get();
+    }
+
+    auto thisParams = self->getAllParams();
+    auto otherParams = candidate->getAllParams();
+    for (size_t i : indices(thisParams)) {
+      if (thisParams[i] != otherParams[i])
+        return false;
+    }
+
+    auto thisReqts = self->getAllRequirements();
+    auto otherReqts = candidate->getAllRequirements();
+    for (size_t i : indices(thisReqts)) {
+      if (thisReqts[i] != otherReqts[i])
+        return false;
+    }
+  }
+
+  friend llvm::hash_code hash_value(
+          const ExtendedExistentialTypeDescriptorCacheEntry &value) {
+    Key key = {value.Data};
+    return hash_value(key);
+  }
+};
+
+}
+
+/// The uniquing structure for extended existential type descriptors.
+static SimpleGlobalCache<ExtendedExistentialTypeDescriptorCacheEntry>
+  ExtendedExistentialTypeDescriptors;
+
+const ExtendedExistentialTypeDescriptor *
+swift::swift_getExtendedExistentialTypeDescriptor(
+            const NonUniqueExtendedExistentialTypeDescriptor *nonUnique) {
+  // The description pointer is expected to be signed with an
+  // address-undiversified schema when passed in.
+  nonUnique = ptrauth_auth_data(nonUnique,
+    SpecialPointerAuthDiscriminators::ExtendedExistentialDescriptor);
+
+  // Check the cache.
+  auto &cache = *nonUnique->UniqueCache.get();
+  auto ptr = cache.load(std::memory_order_acquire);
+  if (ptr) {
+    // Resign the returned pointer from an address-diversified to an
+    // undiversified schema.
+    return ptrauth_auth_and_resign(ptr,
+        ptrauth_key_process_independent_data,
+        ptrauth_blend_discriminator(&cache,
+          SpecialPointerAuthDiscriminators::ExtendedExistentialDescriptor),
+        ptrauth_key_process_independent_data,
+        SpecialPointerAuthDiscriminators::ExtendedExistentialDescriptor);
+  }
+
+  // Find the unique entry.
+  auto uniqueEntry = ExtendedExistentialTypeDescriptors.getOrInsert(
+      Key{ &nonUnique->LocalCopy });
+
+  // Cache the uniqued description, signing it with an
+  // address-diversified schema.
+  cache.store(ptrauth_sign_unauthenticated(entry->Data,
+                ptrauth_key_process_independent_data,
+                ptrauth_blend_discriminator(&cache,
+          SpecialPointerAuthDiscriminators::ExtendedExistentialDescriptor)),
+              std::memory_order_release);
+
+  // Return the uniqued description, signing it with an
+  // address-undiviersified schema.
+  return ptrauth_sign_unauthenticated(entry->Data,
+           ptrauth_key_process_independent_data,
+           SpecialPointerAuthDiscriminators::ExtendedExistentialDescriptor);
+}
+
+/***************************************************************************/
+/*** Extended existential types ********************************************/
+/***************************************************************************/
+
+namespace {
+
+class ExtendedExistentialCacheEntry {
+public:
+  FullMetadata<ExtendedExistentialTypeMetadata> Data;
+
+  struct Key {
+    MetadataCacheKey Arguments;
+    const ExtendedExistentialTypeDescriptor *Shape;
+
+    Key(const ExtendedExistentialTypeDescriptor *shape,
+        const void * const *arguments)
+      : Arguments(getNumKeyParameters(shape->getGenParams()),
+                  getNumKeyWitnessTables(shape->getGenRequirements())
+                  arguments),
+        Shape(shape) {}
+
+    friend llvm::hash_code hash_value(const Key &key) {
+      return llvm::hash_combine(key.Shape, // by address
+                                key.Arguments.hash());
+    }
+
+    bool operator==(const Key &other) {
+      return Shape == other.Shape && Arguments == other.Arguments;
+    }
+  };
+
+  ExtendedExistentialCacheEntry(Key key);
+  static const ValueWitnessTable *getOrCreateVWT(Key key);
+
+  intptr_t getKeyIntValueForDump() {
+    return 0;
+  }
+
+  Key getKey() const {
+    return Key{Data.Shape, Data.getGeneralizationArguments()}:
+  }
+
+  bool matchesKey(Key key) const {
+    // Bypass the eager hashing done in the Key constructor in the most
+    // important negative case.
+    if (Data.Shape != key.Shape)
+      return false;
+
+    return (getKey() == key);
+  }
+
+  friend llvm::hash_code hash_value(const ExtendedExistentialCacheEntry &value) {
+    return hash_value(value.getKey());
+  }
+
+  static size_t getExtraAllocationSize(Key key) {
+    return ExtendedExistentialTypeMetadata::additionalSizeToAlloc<
+             const void *
+           >(key.Shape->GenSigHeader.getArgumentLayoutSizeInWords());
+  }
+
+  size_t getExtraAllocationSize() const {
+    return ExtendedExistentialTypeMetadata::additionalSizeToAlloc<
+             const void *
+           >(Data.Shape->GenSigHeader.getArgumentLayoutSizeInWords());
+  }
+};
+
+} // end anonymous namespace
+
+const ValueWitnessTable *
+ExtendedExistentialCacheEntry::getOrCreateVWT(Key key) {
+  auto shape = key.Shape;
+
+  if (auto witnesses = key.getSuggestedValueWitnesses())
+    return witnesses;
+
+  auto valueStorageSize = shape->Flags.getInlineStorageSize();
+  auto valueStorageAlignMask = shape->Flags.getInlineStorageAlignMask();
+
+  // The type head must name all the type parameters, so we must not have
+  // multiple type parameters if we have an opaque type head.
+  auto sigSizeInWords = shape->ReqSigHeader.getArgumentLayoutSizeInWords();
+
+  assert(getNumKeyParameters(shape->getReqParameters())
+           == shape->ReqSigHeader.NumParams &&
+         "requirement signature for existential includes a "
+         "redundant parameter?");
+  assert(getNumKeyWitnessTables(shape->getReqRequirements())
+           == sigSizeInWords - shape->ReqSigHeader.NumParams &&
+         "requirement signature for existential includes an "
+         "unexpected key argument?");
+  // TODO: pack-parameters
+  unsigned wtableStorageSizeInWords =
+    shape->ReqSigHeader.getArgumentLayoutSizeInWords()
+    - shape->ReqSigHeader.NumParams;
+
+  // Recognize some common special cases.
+
+  // Class existentials.
+  if (shape->Flags.isClassConstrained()) {
+    assert(shape->Flags.areValuesAlwaysInline() &&
+           valueStorageSize == sizeof(void*) &&
+           valueStorageAlignMask == alignof(void*) - 1);
+    // Class-constrained existentials don't store type metadata.
+    return getExistentialValueWitnesses(ProtocolClassConstraint::Class,
+                                        /*superclass*/ nullptr,
+                                        wtableStorageSizeInWords,
+                                        SpecialProtocol::None);
+  }
+
+  // Existential metatypes.
+  if (shape->Flags.isMetatypeConstrained()) {
+    assert(shape->Flags.areValuesAlwaysInline() &&
+           valueStorageSize == sizeof(void*) &&
+           valueStorageAlignMask == alignof(void*) - 1);
+    // Metatype-constrained existentials don't store type metadata.
+    return getExistentialMetatypeValueWitnesses(wtableStorageSizeInWords);
+  }
+
+  // Opaque existentials.
+  if (shape->isTypeHeadOpaque() &&
+      !shape->Flags.areValuesAlwaysInline() &&
+      valueStorageSize == sizeof(ValueBuffer) &&
+      valueStorageAlignMask == alignof(ValueBuffer) - 1) {
+    // The type head is opaque here, so we know that we have exactly
+    // one key type parameter.
+    assert(shape->ReqSigHeader.NumParams == 1);
+    return getExistentialValueWitnesses(ProtocolClassConstraint::Any,
+                                        /*superclass*/ nullptr,
+                                        wtableStorageSizeInWords,
+                                        SpecialProtocol::None);
+  }
+
+  // Otherwise, we have the general case.
+
+  // TODO: teach the value witnesses to synthesize metadata from 
+
+  assert(sigSizeInWords > 0);
+  auto totalSize = roundUpToAlignment(valueStorageSize, alignof(void*))
+                 + sigSizeInWords * sizeof(void*);
+  auto totalAlignMask = std::max(valueStorageAlignMask, alignof(void*) - 1);
+
+  // Trivial types.
+  if (shape->Flags.isTrivial() &&
+      shape->Flags.areValuesAlwaysInline()) {
+    return getTrivialValueWitnesses(totalSize, totalAlignMask);
+  XXX FIXME extra inhabitants XXX
+  }
+
+
+  if 
+
+
+    valueStorageSize == sizeof()) {
+    auto special = SpecialProtocol::None;
+    if (key.NumProtocols == 1)
+      special = key.Protocols[0].getSpecialProtocol();
+
+    Data.setKind(MetadataKind::Existential);
+    getExistentialValueWitnesses(,
+                                                       key.SuperclassConstraint,
+                                                       numWitnessTables,
+                                                       special);
+
+  }
+}
+
+ExtendedExistentialCacheEntry::ExtendedExistentialCacheEntry(Key key)
+  : Data(getOrCreateVWT(key), key.Shape) {
+  memcpy(Data.getTrailingObjects<const void *>(),
+         key.Arguments.begin(),
+         key.Arguments.size() * sizeof(const void *));
+}
+
+/// The uniquing structure for existential type metadata.
+static SimpleGlobalCache<ExistentialCacheEntry, ExistentialTypesTag> ExistentialTypes;
 
 /***************************************************************************/
 /*** Foreign types *********************************************************/
