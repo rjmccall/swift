@@ -18,6 +18,7 @@ target_link_libraries(swiftSerialization PRIVATE
   swiftClangImporter
   swiftOption
   swiftAST
-  swiftSIL)
+  swiftSIL
+  swiftSILOptimizer)  # required because of cyclic depedencies with swiftSIL
 
 set_swift_llvm_is_available(swiftSerialization)
