@@ -985,7 +985,7 @@ public:
     return TheExpander.claimNextOuterPackArg();
   }
   void finishCurrent(ManagedValue packAddr) {
-    TheExpander.finishCurrentOuterPackArg(packAddr);
+    // Ignore: we don't care about tracking *outer* pack cleanups
   }
 };
 
@@ -1214,11 +1214,25 @@ public:
 /// we are emitting the body of that closure, and therefore the inputs
 /// we receive are the parameters of that closure, matching the lowered
 /// signature of the second function type.)
-class TranslateArguments :
-    public ExpanderBase<TranslateArguments, ParamInfo> {
+class TranslateArguments : public ExpanderBase<TranslateArguments, ParamInfo> {
+  class InnerPackArgGenerator {
+    TranslateArguments &translator;
+  public:
+    InnerPackArgGenerator(TranslateArguments &translator)
+      : translator(translator) {}
+
+    ManagedValue claimNext() {
+      return translator.createInnerIndirectPackArg();
+    }
+    void finishCurrent(ManagedValue packAddr) {
+      translator.finishInnerIndirectPackArg(packAddr);
+    }
+  };
+
   SmallVectorImpl<ManagedValue> &InnerArgs;
   CanSILFunctionType InnerTypesFuncTy;
   ArrayRef<SILParameterInfo> InnerTypes;
+  InnerPackArgGenerator InnerPacks;
 public:
   TranslateArguments(SILGenFunction &SGF, SILLocation loc,
                      ArrayRef<ManagedValue> outerArgs,
@@ -1226,7 +1240,8 @@ public:
                      CanSILFunctionType innerTypesFuncTy,
                      ArrayRef<SILParameterInfo> innerTypes)
     : ExpanderBase(SGF, loc, outerArgs), InnerArgs(innerArgs),
-      InnerTypesFuncTy(innerTypesFuncTy), InnerTypes(innerTypes) {}
+      InnerTypesFuncTy(innerTypesFuncTy), InnerTypes(innerTypes),
+      InnerPacks(*this) {}
 
   void process(AbstractionPattern innerOrigFunctionType,
                AnyFunctionType::CanParamArrayRef innerSubstTypes,
@@ -1266,8 +1281,8 @@ public:
       // into multiple parameters, so if the outer abstraction pattern is
       // opaque, this will explode the outer value. Otherwise, the outer
       // parameters will be mapped one-to-one to the inner parameters.
-      process(innerOrigType, innerSubstType,
-              outerOrigType, outerSubstType);
+      expand(innerOrigType, innerSubstType,
+             outerOrigType, outerSubstType);
       OuterArgs.finish();
       return;
     }
@@ -1301,24 +1316,24 @@ public:
     for (; !innerParams.isFinished(); innerParams.advance()) {
       // If we have a pack expansion formal parameter in the orig
       // inner type, it corresponds to N formal parameters in the
-      // substituted inner type.  processToPackParam will pull off
-      // N substituted formal parameters from the outer type.
+      // substituted inner type.  This will pull off N substituted
+      // formal parameters from the outer type.
       if (innerParams.isOrigPackExpansion()) {
         auto innerPackParam = claimNextInnerParam();
         auto innerPackArg =
-          processToPackParam(innerParams.getOrigType(),
-                             innerParams.getSubstParams(),
-                             innerPackParam,
-                             outerParams);
+          expandPackInnerParam(innerParams.getOrigType(),
+                               innerParams.getSubstParams(),
+                               innerPackParam,
+                               outerParams);
         InnerArgs.push_back(innerPackArg);
 
       // Otherwise, we have a single, non-pack formal parameter
-      // in the inner type.  processToSingleParam will pull
-      // off a single formal parameter from the outer type.
+      // in the inner type.  This will pull off a single substiuted
+      // formal parameter from outerParams.
       } else {
-        processToSingleParam(innerParams.getOrigType(),
-                             innerParams.getSubstParams()[0],
-                             outerParams);
+        expandOuterSingleInnerParam(innerParams.getOrigType(),
+                                    innerParams.getSubstParams()[0],
+                                    outerParams);
       }
     }
     innerParams.finish();
@@ -1337,18 +1352,21 @@ public:
     assert(outerOrigTypes.size() == innerOrigTypes.size());
 
     for (auto i : indices(outerOrigTypes)) {
-      process(innerOrigTypes[i], innerSubstTypes[i],
-              outerOrigTypes[i], outerSubstTypes[i]);
+      expandParam(innerOrigTypes[i], innerSubstTypes[i],
+                  outerOrigTypes[i], outerSubstTypes[i]);
     }
 
     OuterArgs.finish();
   }
 
 private:
-  void process(AbstractionPattern innerOrigType,
-               AnyFunctionType::CanParam innerSubstType,
-               AbstractionPattern outerOrigType,
-               AnyFunctionType::CanParam outerSubstType) {
+  friend ExpanderBase;
+  using ExpanderBase::expand;
+
+  void expandParam(AbstractionPattern innerOrigType,
+                   AnyFunctionType::CanParam innerSubstType,
+                   AbstractionPattern outerOrigType,
+                   AnyFunctionType::CanParam outerSubstType) {
     // Note that it's OK for the outer to be inout but not the inner;
     // this means we're just going to load the inout and pass it on as a
     // scalar.
@@ -1363,107 +1381,66 @@ private:
                      outerValue, innerParam);
       InnerArgs.push_back(inner);
     } else {
-      process(innerOrigType, innerSubstType.getParameterType(),
-              outerOrigType, outerSubstType.getParameterType());
+      expand(innerOrigType, innerSubstType.getParameterType(),
+             outerOrigType, outerSubstType.getParameterType());
     }
   }
 
-  void process(AbstractionPattern innerOrigType,
-               CanType innerSubstType,
-               AbstractionPattern outerOrigType,
-               CanType outerSubstType) {
-    // Handle the outer pattern being a tuple, which will have been
-    // expanded in the outer parameters.
-    if (outerOrigType.isTuple()) {
-      auto outerTupleType = cast<TupleType>(outerSubstType);
-
-      // If the inner pattern is also a tuple, it needs to be expanded
-      // in the inner arguments.  Do a parallel translation of the
-      // expanded elements.
-      if (innerOrigType.isTuple()) {
-        auto innerTupleType = cast<TupleType>(innerSubstType);
-
-        // Both outer and inner are exploded tuples, easy case.
-        return processParallelExploded(innerOrigType,
-                                       innerTupleType,
-                                       outerOrigType,
-                                       outerTupleType);
-      }
-
-      auto innerParam = claimNextInnerParam();
-      auto innerArg = processTupleIntoSingle(innerOrigType,
-                                             innerSubstType,
-                                             outerOrigType,
-                                             outerTupleType,
-                                             innerParam);
-      InnerArgs.push_back(innerArg);
-      return;
-    }
-
-    // Handle the inner pattern being a tuple, which needs to be
-    // expanded in the inner parameters.
-    if (innerOrigType.isTuple()) {
-      auto innerTupleType = cast<TupleType>(innerSubstType);
-
-      // The outer type must also be a tuple, because there aren't
-      // any conversions that *add* tuple-ness.  It's just not
-      // expanded in the outer parameters.
-      // FIXME: IUO<Tuple> to Tuple, maybe?
-      assert(outerOrigType.isTypeParameter() &&
-             "outer is not a tuple and is not opaque?");
-      auto outerTupleType = cast<TupleType>(outerSubstType);
-
-      processAndExplodeOutOf(innerOrigType, innerTupleType,
-                             outerOrigType, outerTupleType,
-                             claimNextOuterArg());
-      return;
-    }
-
-    // Okay, we are now working with a single value turning into a
-    // single value.
-    auto outerArg = claimNextOuterArg();
-    auto innerParam = claimNextInnerParam();
-    auto innerArg = processSingle(innerOrigType, innerSubstType,
-                                  outerOrigType, outerSubstType,
-                                  outerArg, innerParam);
-    InnerArgs.push_back(innerArg);
-  }
-
-  void processToSingleParam(AbstractionPattern innerOrigType,
+  void expandOuterSingleInnerParam(AbstractionPattern innerOrigType,
                             AnyFunctionType::CanParam innerSubstParam,
                             FunctionInputGenerator &outerParam);
 
-  ManagedValue processToPackParam(
+  void expandPackExpansionFromPack(
+                      AbstractionPattern innerOrigType,
+                      CanType innerSubstType,
+                      AbstractionPattern outerOrigType,
+                      CanType outerSubstType,
+                      CanPackType innerFormalPackType,
+                      ManagedValue innerPackAddr,
+                      unsigned innerPackComponentIndex,
+                      CanPackType outerFormalPackType,
+                      ManagedValue outerTupleOrPackAddr,
+                      unsigned outerComponentIndex);
+
+  ManagedValue expandPackInnerParam(
                        AbstractionPattern innerOrigExpansionType,
                        AnyFunctionType::CanParamArrayRef innerSubstParams,
                        ParamInfo innerParam,
                        FunctionInputGenerator &outerParams);
 
-  ManagedValue processIntoSingle(AbstractionPattern innerOrigType,
-                                 CanType innerSubstType,
-                                 AbstractionPattern outerOrigType,
-                                 CanType outerSubstType,
-                                 ParamInfo innerParam) {
-    if (outerOrigType.isTuple()) {
-      return processTupleIntoSingle(innerOrigType,
-                                    innerSubstType,
-                                    outerOrigType,
-                                    cast<TupleType>(outerSubstType),
-                                    innerParam);
-    }
-
+  ManagedValue expandSingleInnerIndirect(AbstractionPattern innerOrigType,
+                                         CanType innerSubstType,
+                                         AbstractionPattern outerOrigType,
+                                         CanType outerSubstType,
+                                         ParamInfo innerParam) {
+    assert(!outerOrigType.isTuple());
     auto outerArg = claimNextOuterArg();
     return processSingle(innerOrigType, innerSubstType,
                          outerOrigType, outerSubstType,
                          outerArg, innerParam);
   }
 
-  ManagedValue
-  processTupleIntoSingle(AbstractionPattern innerOrigType,
-                         CanType innerSubstType,
-                         AbstractionPattern outerOrigType,
-                         CanTupleType outerSubstType,
-                         ParamInfo innerParam) {
+  void expandOuterTuple(AbstractionPattern innerOrigType,
+                        CanType innerSubstType,
+                        AbstractionPattern outerOrigType,
+                        CanTupleType outerSubstType) {
+    assert(!innerOrigType.isTuple());
+    assert(outerOrigType.isTuple());
+    assert(!outerOrigType.doesTupleVanish());
+
+    auto innerParam = claimNextInnerParam();
+    auto innerArg =
+      expandOuterTupleInnerIndirect(innerOrigType, innerSubstType,
+                                    outerOrigType, outerSubstType,
+                                    innerParam);
+    InnerArgs.push_back(innerArg);
+  }
+
+  ManagedValue expandOuterTupleInnerIndirect(AbstractionPattern innerOrigType,
+                                             CanType innerSubstType,
+                                             AbstractionPattern outerOrigType,
+                                             CanTupleType outerSubstType,
+                                             ParamInfo innerParam) {
     // Tuple types are subtypes of their optionals
     if (auto innerObjectType = innerSubstType.getOptionalObjectType()) {
       auto innerOrigObjectType = innerOrigType.getOptionalObjectType();
@@ -1511,6 +1488,8 @@ private:
     }
 
     if (auto innerTupleType = dyn_cast<TupleType>(innerSubstType)) {
+      // FIXME
+
       // The outer is exploded and the inner is not. process values
       // and store them to a result tuple in memory.
       assert(innerOrigType.isTypeParameter() &&
@@ -1544,11 +1523,11 @@ private:
     llvm_unreachable("Unhandled conversion from exploded tuple");
   }
 
-  void processFromSingle(AbstractionPattern innerOrigType,
-                         AnyFunctionType::CanParam innerSubstParam,
-                         AbstractionPattern outerOrigType,
-                         AnyFunctionType::CanParam outerSubstParam,
-                         ManagedValue outerArg) {
+  void expandSingleOuterParam(AbstractionPattern innerOrigType,
+                              AnyFunctionType::CanParam innerSubstParam,
+                              AbstractionPattern outerOrigType,
+                              AnyFunctionType::CanParam outerSubstParam,
+                              ManagedValue outerArg) {
     CanType outerSubstType = outerSubstParam.getParameterType();
     CanType innerSubstType = innerSubstParam.getParameterType();
 
@@ -1560,19 +1539,69 @@ private:
                                            outerOrigType, outerSubstType,
                                            outerArg, innerLoweredTy);
       InnerArgs.push_back(innerArg);
-    } else if (innerOrigType.isTuple()) {
-      processAndExplodeOutOf(outerOrigType,
-                             cast<TupleType>(outerSubstType),
-                             innerOrigType,
-                             cast<TupleType>(innerSubstType),
-                             outerArg);
     } else {
+      expandSingleOuter(innerOrigType, innerSubstType,
+                        outerOrigType, outerSubstType,
+                        outerArg);
+    }
+  }
+
+  void expandSingleOuterIndirect(AbstractionPattern innerOrigType,
+                                 CanType innerSubstType,
+                                 AbstractionPattern outerOrigType,
+                                 CanType outerSubstType,
+                                 ManagedValue outerResultAddr) {
+    expandSingleOuter(innerOrigType, innerSubstType,
+                      outerOrigType, outerSubstType,
+                      outerResultAddr);
+  }
+
+  void expandSingleOuter(AbstractionPattern innerOrigType,
+                         CanType innerSubstType,
+                         AbstractionPattern outerOrigType,
+                         CanType outerSubstType,
+                         ManagedValue outerArg) {
+    if (!innerOrigType.isTuple()) {
       auto innerParam = claimNextInnerParam();
       ManagedValue innerArg = processSingle(innerOrigType, innerSubstType,
                                             outerOrigType, outerSubstType,
                                             outerArg, innerParam);
       InnerArgs.push_back(innerArg);
+    } else if (innerOrigType.doesTupleVanish()) {
+      expandSingleOuterInnerVanishing(outerOrigType,
+                                      outerSubstType,
+                                      innerOrigType,
+                                      innerSubstType,
+                                      outerArg);
+    } else {
+      expandSingleOuterInnerTuple(outerOrigType,
+                                  cast<TupleType>(outerSubstType),
+                                  innerOrigType,
+                                  cast<TupleType>(innerSubstType),
+                                  outerArg);
     }
+  }
+
+  void expandSingleOuterInnerVanishing(AbstractionPattern innerOrigType,
+                                       CanType innerSubstType,
+                                       AbstractionPattern outerOrigType,
+                                       CanType outerSubstType,
+                                       ManagedValue outerArg) {
+    assert(innerOrigType.isTuple());
+    assert(innerOrigType.doesTupleVanish());
+
+    expandInnerVanishingTuple(innerOrigType, innerSubstType,
+       [&](AbstractionPattern innerOrigEltType, CanType innerSubstEltType) {
+      expandSingleOuter(innerOrigEltType, innerSubstEltType,
+                        outerOrigType, outerSubstType,
+                        outerArg);
+    }, [&](AbstractionPattern innerOrigEltType, CanType innerSubstEltType,
+           SILType innerEltTy) {
+      auto innerParam = getInnerPackParamInfo(innerEltTy);
+      return processSingle(innerOrigEltType, innerSubstEltType,
+                           outerOrigType, outerSubstType,
+                           outerArg, innerParam);
+    });
   }
 
   /// Take a tuple that has been exploded in the outer and turn it into
@@ -1740,70 +1769,73 @@ private:
         /*Conformances=*/{});
   }
 
-  /// Handle a tuple that has been exploded in both the outer and
-  /// the inner.
-  void processParallelExploded(AbstractionPattern innerOrigType,
-                               CanTupleType innerSubstType,
-                               AbstractionPattern outerOrigType,
-                               CanTupleType outerSubstType) {
-    assert(outerOrigType.matchesTuple(outerSubstType));
-    assert(innerOrigType.matchesTuple(innerSubstType));
-    assert(outerSubstType->getNumElements() ==
-           innerSubstType->getNumElements());
+  void expandInnerTupleOuterIndirect(AbstractionPattern innerOrigType,
+                                     CanTupleType innerSubstType,
+                                     AbstractionPattern outerOrigType,
+                                     CanType outerSubstType,
+                                     ManagedValue outerArg) {
+    assert(innerOrigType.isTuple());
+    assert(!innerOrigType.doesTupleVanish());
 
-    // FIXME: tuple indexing
+    // The outer subst type must be convertible to the inner subst type,
+    // which is a tuple, so the outer subst type must also be a tuple.
+    auto outerSubstTupleType = cast<TupleType>(outerSubstType);
 
-    for (auto index : indices(innerSubstType.getElementTypes())) {
-      process(innerOrigType.getTupleElementType(index),
-              innerSubstType.getElementType(index),
-              outerOrigType.getTupleElementType(index),
-              outerSubstType.getElementType(index));
-    }
+    expandSingleOuterInnerTuple(innerOrigType, innerSubstType,
+                                outerOrigType, outerSubstTupleType,
+                                outerArg);
   }
 
-  /// Given that a tuple value is being passed indirectly in the
-  /// outer, explode it and process the elements.
-  void processAndExplodeOutOf(AbstractionPattern innerOrigType,
-                              CanTupleType innerSubstType,
-                              AbstractionPattern outerOrigType,
-                              CanTupleType outerSubstType,
-                              ManagedValue outerTupleAddr) {
+  void expandInnerTuple(AbstractionPattern innerOrigType,
+                        CanTupleType innerSubstType,
+                        AbstractionPattern outerOrigType,
+                        CanType outerSubstType) {
+    assert(!outerOrigType.isTuple());
+    assert(innerOrigType.isTuple());
+    assert(!innerOrigType.doesTupleVanish());
+
+    // The outer subst type must be convertible to the inner subst type,
+    // which is a tuple, so the outer subst type must also be a tuple.
+    // But we know here that the outer type doesn't have a tuple pattern,
+    // so it must be passed as a single argument.
+    auto outerSubstTupleType = cast<TupleType>(outerSubstType);
+    auto outerArg = claimNextOuterArg();
+
+    expandSingleOuterInnerTuple(innerOrigType, innerSubstType,
+                                outerOrigType, outerSubstTupleType,
+                                outerArg);
+  }
+
+  /// Given that a tuple value is being passed as an aggregate in
+  /// the outer signature, but not the inner signature, expand the
+  /// tuple.
+  void expandSingleOuterInnerTuple(AbstractionPattern innerOrigType,
+                                   CanTupleType innerSubstType,
+                                   AbstractionPattern outerOrigType,
+                                   CanTupleType outerSubstType,
+                                   ManagedValue outerTuple) {
     assert(outerOrigType.isTypeParameter());
     assert(innerOrigType.matchesTuple(innerSubstType));
     assert(outerSubstType->getNumElements() ==
            innerSubstType->getNumElements());
 
-    SmallVector<ManagedValue, 4> outerEltAddrs;
-    explodeTuple(SGF, Loc, outerTupleAddr, outerEltAddrs);
-    assert(outerEltAddrs.size() == innerSubstType->getNumElements());
+    // FIXME: tuple indexing
+    SmallVector<ManagedValue, 4> outerElts;
+    explodeTuple(SGF, Loc, outerTuple, outerElts);
+    assert(outerElts.size() == innerSubstType->getNumElements());
 
     for (auto index : indices(innerSubstType.getElementTypes())) {
       auto outerEltOrigType = outerOrigType.getTupleElementType(index);
       auto outerEltSubstType = outerSubstType.getElementType(index);
       auto innerEltOrigType = innerOrigType.getTupleElementType(index);
       auto innerEltSubstType = innerSubstType.getElementType(index);
-      auto outerEltAddr = outerEltAddrs[index];
-      assert(outerEltAddr.getType().isAddress() ||
+      auto outerElt = outerElts[index];
+      assert(outerElt.getType().isAddress() ||
              !SGF.silConv.useLoweredAddresses());
 
-      if (auto innerEltTupleType = dyn_cast<TupleType>(innerEltSubstType)) {
-        assert(innerEltOrigType.isTuple());
-        auto outerEltTupleType = cast<TupleType>(outerEltSubstType);
-        processAndExplodeOutOf(innerEltOrigType,
-                               innerEltTupleType,
-                               outerEltOrigType,
-                               outerEltTupleType,
-                               outerEltAddr);
-      } else {
-        auto innerType = claimNextInnerParam();
-        auto innerArg = processSingle(innerEltOrigType,
-                                      innerEltSubstType,
-                                      outerEltOrigType,
-                                      outerEltSubstType,
-                                      outerEltAddr,
-                                      innerType);
-        InnerArgs.push_back(innerArg);
-      }
+      expandSingleOuter(innerEltOrigType, innerEltSubstType,
+                        outerEltOrigType, outerEltSubstType,
+                        outerElt);
     }
   }
 
@@ -1924,6 +1956,18 @@ private:
     }
 
     return inner;
+  }
+
+  void expandSingle(AbstractionPattern innerOrigType,
+                    CanType innerSubstType,
+                    AbstractionPattern outerOrigType,
+                    CanType outerSubstType) {
+    auto outerArg = claimNextOuterArg();
+    auto innerParam = claimNextInnerParam();
+    auto innerArg = processSingle(innerOrigType, innerSubstType,
+                                  outerOrigType, outerSubstType,
+                                  outerArg, innerParam);
+    InnerArgs.push_back(innerArg);
   }
 
   /// process a single value and add it as an inner.
@@ -2051,6 +2095,20 @@ private:
     return ManagedValue::forLValue(temporaryAddr);
   }
 
+  ManagedValue
+  expandSingleIndirect(AbstractionPattern innerOrigType,
+                       CanType innerSubstType,
+                       AbstractionPattern outerOrigType,
+                       CanType outerSubstType,
+                       ParamInfo innerSlot,
+                       ManagedValue outerArg) {
+    auto innerInit = innerSlot.allocateForInitialization(SGF, Loc);
+    processSingleInto(innerOrigType, innerSubstType,
+                      outerOrigType, outerSubstType,
+                      outerArg, innerSlot.getType(), *innerInit);
+    return innerInit->getManagedAddress();
+  }
+
   /// process a single value and initialize the given temporary with it.
   void processSingleInto(AbstractionPattern innerOrigType,
                          CanType innerSubstType,
@@ -2086,6 +2144,7 @@ private:
     return OuterArgs.claimNext();
   }
 
+  friend OuterPackArgGenerator<TranslateArguments>;
   ManagedValue claimNextOuterPackArg() {
     return claimNextOuterArg();
   }
@@ -2102,6 +2161,41 @@ private:
   ParamInfo getInnerParamInfo(SILParameterInfo innerParam) {
     auto innerTy = SGF.getSILType(innerParam, InnerTypesFuncTy);
     return ParamInfo(IndirectSlot(innerTy), innerParam.getConvention());
+  }
+
+  PackGeneratorRef getInnerPackGenerator() {
+    return InnerPacks;
+  }
+
+  ManagedValue createInnerIndirectPackArg() {
+    auto innerPackParam = InnerTypes.front();
+    assert(innerPackParam.isPack());
+    auto innerTy = SGF.getSILType(innerPackParam, InnerTypesFuncTy);
+    auto packAddr =
+      SGF.emitTemporaryPackAllocation(Loc, innerTy.getObjectType());
+    return ManagedValue::forLValue(packAddr);
+  }
+
+  ParameterConvention getInnerPackConvention() {
+    auto innerPackParam = InnerTypes.front();
+    assert(innerPackParam.isPack());
+    return innerPackParam.getConvention();
+  }
+
+  ParamInfo getInnerPackSlot(SILType elementTy) {
+    return getInnerPackParamInfo(elementTy);
+  }
+
+  /// Given an element of an inner pack that we're emitting into,
+  /// return a fake ParamInfo for it.
+  ParamInfo getInnerPackParamInfo(SILType elementTy) {
+    return ParamInfo(IndirectSlot(elementTy), getInnerPackConvention());
+  }
+
+  void finishInnerIndirectPackArg(ManagedValue packAddr) {
+    auto innerPackParam = claimNext(InnerTypes);
+    assert(innerPackParam.isPack()); (void) innerPackParam;
+    InnerArgs.push_back(packAddr);
   }
 };
 
@@ -2313,21 +2407,21 @@ FunctionInputGenerator::projectPackComponent(SILGenFunction &SGF,
   return componentValue;
 }
 
-void TranslateArguments::processToSingleParam(
+void TranslateArguments::expandOuterSingleInnerParam(
                             AbstractionPattern innerOrigType,
                             AnyFunctionType::CanParam innerSubstParam,
                             FunctionInputGenerator &outerParam) {
   // If we're not processing a pack expansion, do a normal translation.
   if (!outerParam.isOrigPackExpansion()) {
-    process(innerOrigType, innerSubstParam,
-            outerParam.getOrigType(), outerParam.getSubstParam());
+    expandParam(innerOrigType, innerSubstParam,
+                outerParam.getOrigType(), outerParam.getSubstParam());
 
   // Pull out a scalar component from the pack and process that.
   } else {
     auto outerValue = outerParam.projectPackComponent(SGF, Loc);
-    processFromSingle(innerOrigType, innerSubstParam,
-                      outerParam.getOrigType(), outerParam.getSubstParam(),
-                      outerValue);
+    expandSingleOuterParam(innerOrigType, innerSubstParam,
+                           outerParam.getOrigType(), outerParam.getSubstParam(),
+                           outerValue);
   }
 
   outerParam.advance();
@@ -2348,7 +2442,7 @@ getScalarConventionForPackConvention(ParameterConvention conv) {
   llvm_unreachable("bad convention");
 }
 
-ManagedValue TranslateArguments::processToPackParam(
+ManagedValue TranslateArguments::expandPackInnerParam(
                        AbstractionPattern innerOrigExpansionType,
                        AnyFunctionType::CanParamArrayRef innerSubstParams,
                        ParamInfo innerPackParam,
@@ -2399,11 +2493,11 @@ ManagedValue TranslateArguments::processToPackParam(
       ParamInfo innerComponentParam(IndirectSlot(innerComponentTy),
         getScalarConventionForPackConvention(innerPackParam.getConvention()));
 
-      ManagedValue innerArg = processIntoSingle(innerOrigPatternType,
-                                                innerSubstType,
-                                                outerOrigType,
-                                                outerSubstType,
-                                                innerComponentParam);
+      ManagedValue innerArg = expandSingleInnerIndirect(innerOrigPatternType,
+                                                        innerSubstType,
+                                                        outerOrigType,
+                                                        outerSubstType,
+                                                        innerComponentParam);
       insertScalarIntoPack(innerArg);
 
     // Otherwise, we're starting with the outer value from the pack.
@@ -3066,9 +3160,6 @@ private:
 
     return OuterArgs.claimNext();
   }
-  void finishCurrentOuterPackArg(ManagedValue packAddr) {
-    // ignore; all of the cleanup changes should be irrelevant
-  }
 
   /// Create a temporary address suitable for passing to the given inner
   /// indirect result and add it as an inner indirect result.
@@ -3090,6 +3181,10 @@ private:
                             SGF.getSILType(innerResult, CanSILFunctionType()));
     InnerArgs.push_back(temporary);
     return temporary;
+  }
+
+  IndirectSlot getInnerPackSlot(SILType elementTy) {
+    return IndirectSlot(elementTy);
   }
 
   PackGeneratorRef getInnerPackGenerator() {
@@ -3298,9 +3393,9 @@ void ExpanderBase<Impl, InnerSlotType>::expand(
                       outerOrigEltType, outerSubstEltType);
     }, [&](AbstractionPattern outerOrigEltType, CanType outerSubstEltType,
            ManagedValue outerAddr) {
-      asImpl().expandOuterIndirect(innerOrigType, innerSubstType,
-                                   outerOrigEltType, outerSubstEltType,
-                                   outerAddr);
+      return asImpl().expandOuterIndirect(innerOrigType, innerSubstType,
+                                          outerOrigEltType, outerSubstEltType,
+                                          outerAddr);
     });
     return;
   }
@@ -3314,12 +3409,13 @@ void ExpanderBase<Impl, InnerSlotType>::expand(
       asImpl().expand(innerOrigEltType, innerSubstEltType,
                       outerOrigType, outerSubstType);
     }, [&](AbstractionPattern innerOrigEltType, CanType innerSubstEltType,
-           SILType innerResultTy) {
+           SILType innerEltTy) {
+      auto innerSlot = asImpl().getInnerPackSlot(innerEltTy);
       return asImpl().expandInnerIndirect(innerOrigEltType,
                                           innerSubstEltType,
                                           outerOrigType,
                                           outerSubstType,
-                                          IndirectSlot(innerResultTy));
+                                          innerSlot);
     });
     return;
   }
@@ -3437,6 +3533,7 @@ void ExpanderBase<Impl, InnerSlotType>::expandParallelTuples(
     // immediately.
     if (auto outerSubstExpansionType =
           dyn_cast<PackExpansionType>(outerElt.getSubstType())) {
+      FIXME: cleanups
       asImpl().expandPackExpansionFromPack(
                                 innerElt.getOrigType(),
         cast<PackExpansionType>(innerElt.getSubstType()).getPatternType(),
@@ -3459,11 +3556,12 @@ void ExpanderBase<Impl, InnerSlotType>::expandParallelTuples(
     if (outerElt.isOrigPackExpansion()) {
       auto outerEltAddr = outerElt.projectPackComponent(SGF, Loc);
       if (innerElt.isOrigPackExpansion()) {
+        auto innerSlot =
+          asImpl().getInnerPackSlot(innerElt.getPackComponentType());
         auto innerEltAddr =
           asImpl().expandSingleIndirect(innerOrigEltType, innerSubstEltType,
                                         outerOrigEltType, outerSubstEltType,
-                           IndirectSlot(innerElt.getPackComponentType()),
-                                        outerEltAddr);
+                                        innerSlot, outerEltAddr);
         innerElt.setPackComponent(SGF, Loc, innerEltAddr);
       } else {
         asImpl().expandOuterIndirect(innerOrigEltType, innerSubstEltType,
@@ -3472,11 +3570,12 @@ void ExpanderBase<Impl, InnerSlotType>::expandParallelTuples(
       }
     } else {
       if (innerElt.isOrigPackExpansion()) {
+        auto innerSlot =
+          asImpl().getInnerPackSlot(innerElt.getPackComponentType());
         auto innerEltAddr =
           asImpl().expandInnerIndirect(innerOrigEltType, innerSubstEltType,
                                        outerOrigEltType, outerSubstEltType,
-                                       IndirectSlot(
-                                         innerElt.getPackComponentType()));
+                                       innerSlot);
         innerElt.setPackComponent(SGF, Loc, innerEltAddr);
       } else {
         asImpl().expand(innerOrigEltType, innerSubstEltType,
@@ -3544,6 +3643,104 @@ void ResultPlanner::expandPackExpansionFromPack(
   // call.
   SILValue innerTemporaryAddr;
   bool reabstract = hasAbstractionDifference(innerEltTy, outerEltTy);
+  if (reabstract) {
+    auto innerTemporaryTy =
+      SILType::getPrimitiveObjectType(CanType(
+        TupleType::get({innerPackExpansionTy.getASTType()},
+                       SGF.getASTContext())));
+    innerTemporaryAddr = SGF.emitTemporaryAllocation(Loc, innerTemporaryTy);
+  }
+
+  // Perform a pack loop to set the element addresses for this pack
+  // expansion in the inner pack.
+  SGF.emitDynamicPackLoop(Loc, innerFormalPackType, innerPackComponentIndex,
+                          openedEnv,
+                          [&](SILValue indexWithinComponent,
+                              SILValue packExpansionIndex,
+                              SILValue innerPackIndex) {
+    SILValue innerEltAddr;
+    if (reabstract) {
+      innerEltAddr = SGF.B.createTuplePackElementAddr(Loc, packExpansionIndex,
+                                                      innerTemporaryAddr,
+                                                      innerEltTy);
+    } else {
+      SILValue outerPackIndex = packExpansionIndex;
+      if (outerFormalPackType->getNumElements() != 1) {
+        outerPackIndex =
+          SGF.B.createPackPackIndex(Loc, outerComponentIndex,
+                                    outerPackIndex, outerFormalPackType);
+      }
+
+      // Since we're not reabstracting, we can use the outer address
+      // directly as the inner address.
+      innerEltAddr = emitTupleOrPackElementAddr(SGF, Loc, outerPackIndex,
+                                    outerTupleOrPackAddr.getLValueAddress(),
+                                                outerEltTy);
+    }
+
+    SGF.B.createPackElementSet(Loc, innerEltAddr, innerPackIndex,
+                               innerPackAddr.getLValueAddress());
+  });
+
+  if (reabstract) {
+    auto innerFormalPackType =
+      innerTemporaryAddr->getType().castTo<TupleType>().getInducedPackType();
+    unsigned innerComponentIndex = 0;
+
+    addReabstractTupleIntoPackExpansion(innerOrigType, innerSubstType,
+                                        outerOrigType, outerSubstType,
+                                        innerFormalPackType,
+                                        innerTemporaryAddr,
+                                        innerComponentIndex,
+                                        outerFormalPackType,
+                                        outerTupleOrPackAddr.getLValueAddress(),
+                                        outerComponentIndex);
+  }
+}
+
+void TranslateArguments::expandPackExpansionFromPack(
+                      AbstractionPattern innerOrigType,
+                      CanType innerSubstType,
+                      AbstractionPattern outerOrigType,
+                      CanType outerSubstType,
+                      CanPackType innerFormalPackType,
+                      ManagedValue innerPackAddr,
+                      unsigned innerPackComponentIndex,
+                      CanPackType outerFormalPackType,
+                      ManagedValue outerTupleOrPackAddr,
+                      unsigned outerComponentIndex) {
+  SILType innerPackExpansionTy =
+    innerPackAddr.getType().getPackElementType(innerPackComponentIndex);
+  SILType outerPackExpansionTy =
+    getTupleOrPackElementType(outerTupleOrPackAddr.getType(),
+                              outerComponentIndex);
+
+  SILType innerEltTy, outerEltTy;
+  auto openedEnv = SGF.createOpenedElementValueEnvironment(
+                   { innerPackExpansionTy, outerPackExpansionTy },
+                   { &innerEltTy, &outerEltTy });
+
+  auto innerPackConvention = getInnerPackConvention();
+  auto outerPackConvention = getOuterPackConvention();
+
+  // If the pack elements need reabstraction, we need to do that into
+  // a temporary tuple so that they're in a location that will survive
+  // the loop.  Note that we *also* need to do this if we have to copy
+  // the elements.
+  SILValue innerTemporaryAddr;
+  bool reabstract = hasAbstractionDifference(innerEltTy, outerEltTy);
+  if (!reabstract) {
+    // If the inner parameter is @pack_owned, we can only forward the
+    // outer parameter if it's also @pack_owned.
+    // TODO: this is forcing *trivial* packs/tuples to be copied just
+    // in case the inner context wants to mutate the memory, even though
+    // we might have ownership of that memory.
+    if (isConsumedParameter(innerPackConvention) &&
+        !outerTupleOrPackAddr.isPlusOne(SGF)) {
+      reabstract = true;
+    }
+  }
+
   if (reabstract) {
     auto innerTemporaryTy =
       SILType::getPrimitiveObjectType(CanType(
@@ -3835,11 +4032,12 @@ void ExpanderBase<Impl, InnerSlotType>::expandOuterIndirect(
                                  outerAddr);
   }, [&](AbstractionPattern innerOrigEltType,
          CanType innerSubstEltType, SILType innerEltTy) {
+    auto innerSlot = asImpl().getInnerPackSlot(innerEltTy);
     return asImpl().expandSingleIndirect(innerOrigEltType,
                                          innerSubstEltType,
                                          outerOrigType,
                                          outerSubstType,
-                                         IndirectSlot(innerEltTy),
+                                         innerSlot,
                                          outerAddr);
   });
 }
@@ -3957,12 +4155,14 @@ void ExpanderBase<Impl, InnerSlotType>::expandParallelTuplesOuterIndirect(
     }
 
     if (!innerElt.isSubstPackExpansion()) {
+      auto innerSlot =
+        asImpl().getInnerPackSlot(innerElt.getPackComponentType());
       ManagedValue innerEltAddr =
         asImpl().expandSingleIndirect(innerElt.getOrigType(),
                                       innerElt.getSubstType(),
                                       outerElt.getOrigType(),
                                       outerElt.getSubstType(),
-                         IndirectSlot(innerElt.getPackComponentType()),
+                                      innerSlot,
                                       outerEltAddr);
       innerElt.setPackComponent(SGF, Loc, innerEltAddr);
       continue;
