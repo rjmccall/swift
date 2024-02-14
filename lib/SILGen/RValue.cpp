@@ -420,19 +420,36 @@ static void verifyHelper(ArrayRef<ManagedValue> values,
 
 // Private helper constructor. Please see RValue.h for more information.
 RValue::RValue(SILGenFunction *SGF, ArrayRef<ManagedValue> values, CanType type)
-    : values(values.begin(), values.end()), type(type), elementsToBeAdded(0) {
+    : type(type), elementsToBeAdded(0) {
 
-  assert(values.size() == expectedExplosionSize(type)
-         && "creating rvalue with wrong number of pre-exploded elements");
-  
   if (values.size() == 1 && values[0].isInContext()) {
-    values = ArrayRef<ManagedValue>();
+    state = State::InContext;
     type = CanType();
-    elementsToBeAdded = InContext;
     return;
   }
 
-  verifyHelper(values, SGF);
+  if (auto tupleType = dyn_cast<TupleType>(type)) {
+    if (tupleType->getNumElements() == 0) {
+      assert(values.size() == 0);
+      state = State::EmptyTuple;
+    } else if (tupleType.containsPackExpansionType()) {
+      assert(values.size() == 1 &&
+             "tuple with pack expansion should not be expanded");
+      state = State::PackExpansionTuple;
+      storage.emplace<SingletonStorage>(state, values[0]);
+    } else {
+      assert(values.size() == expectedExplosionSize(tupleType)
+             && "creating rvalue with wrong number of pre-exploded elements");
+      state = State::Tuple;
+      storage.emplace<TupleStorage>(state, values.begin(), values.end());
+    }
+  } else {
+    assert(values.size() == 1);
+    state = State::Singleton;
+    storage.emplace<SingletonStorage>(state, values[0]);
+  }
+
+  verifyHelper(getStoredValues(), SGF);
 }
 
 RValue::RValue(SILGenFunction &SGF, SILLocation l, CanType formalType,
@@ -442,51 +459,107 @@ RValue::RValue(SILGenFunction &SGF, SILLocation l, CanType formalType,
   assert(v && "creating r-value with consumed value");
 
   if (v.isInContext()) {
+    state = State::InContext;
     type = CanType();
-    elementsToBeAdded = InContext;
     return;
   }
 
-  ExplodeTupleValue(values, SGF, l).visit(formalType, v);
-  assert(values.size() == getRValueSize(type));
+  // TODO: don't eagerly expand
+
+  if (auto tupleType = dyn_cast<TupleType>(type)) {
+    if (tupleType->getNumElements() == 0) {
+      state = State::EmptyTuple;
+    } else if (tupleType.containsPackExpansionType()) {
+      state = State::PackExpansionTuple;
+      storage.emplace<SingletonStorage>(state, v);
+    } else {
+      state = State::Tuple;
+      auto &values = storage.emplace<TupleStorage>(state);
+      auto size = expectedExplosionSize(tupleType);
+      values.reserve(size);
+      ExplodeTupleValue(values, SGF, l).visit(formalType, v);
+      assert(values.size() == size);
+    }
+  } else {
+    state = State::Singleton;
+    storage.emplace<SingletonStorage>(state, v);
+  }
+
   verify(SGF);
 }
 
 RValue::RValue(SILGenFunction &SGF, Expr *expr, ManagedValue v)
-  : type(expr->getType()->getCanonicalType()), elementsToBeAdded(0) {
-
-  if (v.isInContext()) {
-    type = CanType();
-    elementsToBeAdded = InContext;
-    return;
-  }
-
-  assert(v && "creating r-value with consumed value");
-  ExplodeTupleValue(values, SGF, expr).visit(type, v);
-  assert(values.size() == getRValueSize(type));
-  verify(SGF);
-}
+  : RValue(SGF, expr, v, expr->getType()->getCanonicalType()) {}
 
 RValue::RValue(CanType type)
   : type(type), elementsToBeAdded(getTupleSize(type)) {
+
+  if (auto tupleType = dyn_cast<TupleType>(type)) {
+    if (tupleType->getNumElements() == 0) {
+      state = State::EmptyTuple;
+    } else if (tupleType.containsPackExpansionType()) {
+      state = State::PackExpansionTuple;
+      storage.emplace<SingletonStorage>(state, ManagedValue());
+    } else {
+      state = State::Tuple;
+      auto &values = storage.emplace<TupleStorage>(state);
+      auto size = expectedExplosionSize(tupleType);
+      values.reserve(size);
+    }
+  } else {
+    state = State::Singleton;
+    storage.emplace<SingletonStorage>(state, ManagedValue());
+  }
 }
 
 void RValue::addElement(RValue &&element) & {
   assert(!element.isUsed() && "adding consumed value to r-value");
   assert(!element.isInSpecialState() && "adding special value to r-value");
+
   assert(!isComplete() && "rvalue already complete");
-  assert(!isInSpecialState() && "cannot add elements to a special r-value");
   --elementsToBeAdded;
-  values.insert(values.end(),
-                element.values.begin(), element.values.end());
-  element.makeUsed();
+
+  switch (state) {
+  case State::Null:
+  case State::InContext:
+  case State::Used:
+    llvm_unreachable("adding element to rvalue in special state");
+
+  case State::EmptyTuple:
+    llvm_unreachable("empty tuple rvalue was not complete?");
+
+  case State::Singleton: {
+    assert(element.state == State::Singleton);
+    storage.get<SingletonStorage>(state) =
+      element.storage.get<SingletonStorage>(state);
+    element.makeUsed();
+    break;
+  }
+
+  case State::PackExpansionTuple: {
+    assert(element.state == State::PackExpansionTuple);
+    storage.get<SingletonStorage>(state) =
+      element.storage.get<SingletonStorage>(state);
+    element.makeUsed();
+    break;
+  }
+
+  case State::Tuple: {
+    auto &values = storage.get<TupleStorage>(state);
+    auto elementValues = element.getStoredValues();
+    values.append(elementValues.begin(), elementValues.end());
+    element.makeUsed();
+    break;
+  }
+  }
 
   assert(!isComplete() || values.size() == getRValueSize(type));
+
   // Call into the verifier helper directly without an SGF since we know that
   // all of our loadable values are already loaded and thus we do not need to
   // recheck that. On the other hand, we need to check the consistency of
   // cleanups and ownership.
-  verifyHelper(values);
+  verifyHelper(getStoredValues(), values);
 }
 
 SILValue RValue::forwardAsSingleValue(SILGenFunction &SGF, SILLocation l) && {
@@ -511,14 +584,14 @@ void RValue::forwardInto(SILGenFunction &SGF, SILLocation loc,
                          Initialization *I) && {
   assert(isComplete() && "rvalue is not complete");
   assert(isPlusOneOrTrivial(SGF) && "Can not forward borrowed RValues");
-  ArrayRef<ManagedValue> elts = values;
+  ArrayRef<ManagedValue> elts = getStoredValues();
   copyOrInitValuesInto<ImplodeKind::Forward>(I, elts, type, loc, SGF);
 }
 
 void RValue::copyInto(SILGenFunction &SGF, SILLocation loc,
                       Initialization *I) const & {
   assert(isComplete() && "rvalue is not complete");
-  ArrayRef<ManagedValue> elts = values;
+  ArrayRef<ManagedValue> elts = getStoredValues();
   copyOrInitValuesInto<ImplodeKind::Copy>(I, elts, type, loc, SGF);
 }
 
@@ -526,7 +599,7 @@ void RValue::assignInto(SILGenFunction &SGF, SILLocation loc,
                         SILValue destAddr) && {
   assert(isComplete() && "rvalue is not complete");
   assert(isPlusOneOrTrivial(SGF) && "Can not assign borrowed RValues");
-  ArrayRef<ManagedValue> srcMvValues = values;
+  ArrayRef<ManagedValue> srcMvValues = getStoredValues();
 
   SWIFT_DEFER { assert(srcMvValues.empty() && "didn't claim all elements!"); };
 
@@ -559,43 +632,48 @@ void RValue::assignInto(SILGenFunction &SGF, SILLocation loc,
                          AssignOwnershipQualifier::Unknown);
     }
   }
-  srcMvValues = ArrayRef<ManagedValue>();
 }
 
 ManagedValue RValue::getAsSingleValue(SILGenFunction &SGF, SILLocation loc) && {
-  assert(!isUsed() && "r-value already used");
   SWIFT_DEFER {
     makeUsed();
   };
 
-  if (isInContext()) {
+  switch (state) {
+  case State::Null:
+    llvm_unreachable("r-value is null");
+  case State::Used:
+    llvm_unreachable("r-value already used");
+
+  case State::InContext:
     return ManagedValue::forInContext();
-  }
 
-  // Avoid killing and re-emitting the cleanup if the enclosed value isn't a
-  // tuple.
-  if (!isa<TupleType>(type)) {
-    assert(values.size() == 1 && "exploded non-tuple?!");
-    return values[0];
-  }
+  case State::Singleton:
+  case State::PackExpansionTuple:
+    return storage.get<SingletonStorage>(state);
 
-  // *NOTE* Inside implodeTupleValues, we copy our values if they are not at +1.
-  return implodeTupleValues<ImplodeKind::Forward>(values, SGF, type, loc);
+  case State::EmptyTuple:
+    return implodeTupleValues<ImplodeKind::Forward>({}, SGF, type, loc);
+
+  case State::Tuple: {
+    auto &values = storage.get<TupleStorage>(state);
+    // *NOTE* Inside implodeTupleValues, we copy our values if they are not at +1.
+    return implodeTupleValues<ImplodeKind::Forward>(values, SGF, type, loc);
+  }
+  }
+  llvm_unreachable("bad kind");
 }
 
 SILValue RValue::getUnmanagedSingleValue(SILGenFunction &SGF,
                                          SILLocation l) const & {
-  assert(isComplete() && "rvalue is not complete");
-  ManagedValue mv =
-      implodeTupleValues<ImplodeKind::Unmanaged>(values, SGF, type, l);
-  return mv.getValue();
+  return getAsSingleValue(SGF, l).getUnmanagedValue();
 }
 
 void RValue::forwardAll(SILGenFunction &SGF,
                         SmallVectorImpl<SILValue> &dest) && {
   assert(isComplete() && "rvalue is not complete");
 
-  for (auto value : values)
+  for (auto value : getStoredValues())
     dest.push_back(value.forward(SGF));
 
   makeUsed();
@@ -604,15 +682,9 @@ void RValue::forwardAll(SILGenFunction &SGF,
 void RValue::getAll(SmallVectorImpl<ManagedValue> &dest) && {
   assert(isComplete() && "rvalue is not complete");
 
+  auto values = getStoredValues();
   dest.append(values.begin(), values.end());
   makeUsed();
-}
-
-void RValue::getAllUnmanaged(SmallVectorImpl<SILValue> &dest) const & {
-  assert(isComplete() && "rvalue is not complete");
-
-  for (auto value : values)
-    dest.push_back(value.getUnmanagedValue());
 }
 
 /// Return the range of indexes for the given tuple type element.
@@ -628,24 +700,23 @@ getElementRange(CanTupleType tupleType, unsigned eltIndex) {
   return { begin, end };
 }
 
-RValue RValue::extractElement(unsigned n) && {
+RValue RValue::extractElement(unsigned index) && {
   assert(isComplete() && "rvalue is not complete");
 
   CanTupleType tupleTy = dyn_cast<TupleType>(type);
   if (!tupleTy) {
-    assert(n == 0);
-    unsigned to = getRValueSize(type);
-    assert(to == values.size());
-    RValue element(nullptr, llvm::makeArrayRef(values).slice(0, to), type);
-    makeUsed();
-    return element;
+    assert(index == 0);
+    return std::move(*this);
   }
 
-  // This is implementable, but we can do it lazily if we add that kind
-  // of projection.
-  assert(!tupleTy.containsPackExpansionType() &&
-         "can't extract elements from tuples containing pack expansions "
-         "right now");
+  assert(index < tupleTy->getNumElements());
+
+  // This is implementable, but we currently don't allow it in the
+  // type-checker.  We can implement it lazily if we ever add that feature.
+  assert(state != State::PackExpansionTuple);
+
+  assert(state == State::Tuple);
+  auto &values = stoage.get<TupleStorage>(state);
 
   auto range = getElementRange(tupleTy, n);
   unsigned from = range.first, to = range.second;

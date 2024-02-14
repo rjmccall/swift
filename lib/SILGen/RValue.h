@@ -74,42 +74,64 @@ class RValue {
   friend class swift::Lowering::ArgumentSource;
   friend class swift::Lowering::CleanupCloner;
 
-  std::vector<ManagedValue> values;
-  CanType type;
-  unsigned elementsToBeAdded;
+  enum class State: uint8_t {
+    /// The RValue was default-initialized, representing an invalid value.
+    Null,
 
-  /// Flag value used to mark an rvalue as invalid.
-  ///
-  /// The reasons why this can be true is:
-  ///
-  /// 1. The RValue was consumed.
-  /// 2. The RValue was default-initialized.
-  /// 3. The RValue was emitted into an SGFContext initialization.
-  enum : unsigned {
-    Null = ~0U,
-    Used = Null - 1,
-    InContext = Used - 1,
+    /// The RValue has been consumed from.
+    Used,
+
+    /// The RValue was emitted in an SGFContext initialization.
+    InContext,
+
+    /// The RValue is an empty tuple.
+    EmptyTuple,
+
+    /// The RValue is a single, non-tuple value.
+    Singleton,
+
+    /// The RValue is a tuple containing a pack expansion and is
+    /// stored as a singleton value.
+    PackExpansionTuple,
+
+    /// The RValue is a non-empty tuple.
+    Tuple,
   };
 
-  bool isInSpecialState() const {
-    return elementsToBeAdded >= InContext;
+  using SingletonStorage = ManagedValue;
+  using TupleStorage = std::vector<ManagedValue>;
+
+  using Members = ExternalUnionMembers<void,
+                                       SingletonStorage,
+                                       TupleStorage>;
+  static Members::Index getIndexForKind(State kind) {
+    switch (kind) {
+    case State::Null:
+    case State::Used:
+    case State::InContext:
+    case State::EmptyTuple:
+      return Members::indexOf<void>();
+    case State::Singleton:
+    case State::PackExpansionTuple:
+      return Members::indexOf<SingletonStorage>();
+    case State::Tuple:
+      return Members::indexOf<TupleStorage>();
+    }
+    llvm_unreachable("bad kind");
   }
-  
+
+  ExternalUnion<StorageKind, Members, getIndexForKind> storage;
+  CanType type;
+  State state;
+  unsigned elementsToBeAdded;
+
   // Don't copy.
   RValue(const RValue &) = delete;
   RValue &operator=(const RValue &) = delete;
   
   void makeUsed() {
-    elementsToBeAdded = Used;
-    values = {};
-  }
-
-  /// Private constructor used by copy() and borrow().
-  RValue(SILGenFunction &SGF, std::vector<ManagedValue> &&values, CanType type,
-         unsigned elementsToBeAdded)
-      : values(std::move(values)), type(type),
-        elementsToBeAdded(elementsToBeAdded) {
-    verify(SGF);
+    storage.destruct(state);
+    state = State::Used;
   }
 
   /// Private constructor for RValue::extractElement and pre-exploded element
@@ -125,30 +147,35 @@ class RValue {
   /// formed and thus has elementsToBeAdded set to zero.
   RValue(SILGenFunction *SGF, ArrayRef<ManagedValue> values, CanType type);
 
-  RValue(unsigned state) : elementsToBeAdded(state) {
+  RValue(State state) : state(state), elementsToBeAdded(0) {
     assert(isInSpecialState());
   }
 
 public:
-  RValue() : elementsToBeAdded(Null) {}
+  RValue() : state(State::Null) {}
   
-  RValue(RValue &&rv) : values(std::move(rv.values)),
-                        type(rv.type),
-                        elementsToBeAdded(rv.elementsToBeAdded) {
-    assert((rv.isComplete() || rv.isInSpecialState())
-           && "moving rvalue that wasn't complete?!");
-    rv.elementsToBeAdded = Used;
+  RValue(RValue &&rv)
+      : type(rv.type), state(rv.state), elementsToBeAdded(0) {
+    assert((rv.isComplete() || rv.isInSpecialState()) &&
+           "moving rvalue that wasn't complete?!");
+    storage.moveConstruct(state, std::move(rv.storage));
+    rv.storage.destruct(rv.state);
+    rv.state = State::Used;
   }
 
   RValue &operator=(RValue &&rv) {
     assert((isNull() || isUsed()) && "reassigning an valid rvalue?!");
-    
     assert((rv.isComplete() || rv.isInSpecialState())
            && "moving rvalue that wasn't complete?!");
-    values = std::move(rv.values);
+
+    // It's fine to move-construct instead of move-assign because we know
+    // we're in a trivial state.
+    state = rv.state;
+    elementsToBeAdded = 0;
     type = rv.type;
-    elementsToBeAdded = rv.elementsToBeAdded;
-    rv.elementsToBeAdded = Used;
+    storage.moveConstruct(state, std::move(rv.storage));
+    rv.storage.destruct(rv.state);
+    rv.state = State::Used;
     return *this;
   }
   
@@ -172,7 +199,7 @@ public:
 
   /// Creates an invalid RValue object, in an "in-context" state.
   static RValue forInContext() {
-    return RValue(InContext);
+    return RValue(State::InContext);
   }
 
   static unsigned getRValueSize(CanType substType);
@@ -192,18 +219,20 @@ public:
 
   /// True if the rvalue has been completely initialized by adding all its
   /// elements.
-  bool isComplete() const & { return elementsToBeAdded == 0; }
+  bool isComplete() const & {
+    return !isIsSpecialState() && return elementsToBeAdded == 0;
+  }
 
   /// True if the rvalue was null-initialized.
-  bool isNull() const & { return elementsToBeAdded == Null; }
+  bool isNull() const & { return state == State::Null; }
   
   /// True if this rvalue has been used.
-  bool isUsed() const & { return elementsToBeAdded == Used; }
+  bool isUsed() const & { return state == State::Used; }
 
   /// True if this rvalue was emitted into context.
-  bool isInContext() const & { return elementsToBeAdded == InContext; }
+  bool isInContext() const & { return state == State::InContext; }
   
-  /// Add an element to the rvalue. The rvalue must not yet be complete.
+  /// Add the next element to this rvalue, which must not yet be complete.
   void addElement(RValue &&element) &;
   
   /// Forward an rvalue into a single value, imploding tuples if necessary.
@@ -220,12 +249,12 @@ public:
   
   /// Get the rvalue as a single unmanaged value, imploding tuples if necessary.
   /// The values must not require any cleanups.
-  SILValue getUnmanagedSingleValue(SILGenFunction &SGF, SILLocation l) const &;
+  SILValue getUnmanagedSingleValue(SILGenFunction &SGF, SILLocation l) &&;
 
   ManagedValue getScalarValue() && {
     assert(!isa<TupleType>(type) && "getScalarValue of a tuple rvalue");
-    assert(values.size() == 1);
-    auto value = values[0];
+    assert(state == State::Singleton);
+    auto value = storage.get<SingletonStorage>(state);
     makeUsed();
     return value;
   }
@@ -278,10 +307,6 @@ public:
   
   /// Take the ManagedValues from this RValue into a SmallVector.
   void getAll(SmallVectorImpl<ManagedValue> &values) &&;
-  
-  /// Store the unmanaged SILValues into a SmallVector. The values must not
-  /// require any cleanups.
-  void getAllUnmanaged(SmallVectorImpl<SILValue> &values) const &;
   
   /// Extract a single tuple element from the rvalue.
   RValue extractElement(unsigned element) &&;
