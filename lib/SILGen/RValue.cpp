@@ -40,24 +40,6 @@ static unsigned getTupleSize(CanType t) {
   return 1;
 }
 
-unsigned RValue::getRValueSize(AbstractionPattern pattern, CanType formalType) {
-  if (pattern.isTuple()) {
-    if (pattern.doesTupleContainPackExpansionType())
-      return 1;
-
-    // We can use the naive parallel walk here because of the check above.
-    unsigned count = 0;
-    auto formalTupleType = cast<TupleType>(formalType);
-    for (auto i : indices(formalTupleType.getElementTypes())) {
-      count += getRValueSize(pattern.getTupleElementType(i),
-                             formalTupleType.getElementType(i));
-    }
-    return count;
-  }
-
-  return 1;
-}
-
 /// Return the number of rvalue elements in the given canonical type.
 unsigned RValue::getRValueSize(CanType type) {
   if (auto tupleType = dyn_cast<TupleType>(type)) {
@@ -489,10 +471,6 @@ RValue::RValue(CanType type)
   : type(type), elementsToBeAdded(getTupleSize(type)) {
 }
 
-RValue::RValue(AbstractionPattern pattern, CanType type)
-  : type(type), elementsToBeAdded(getRValueSize(pattern, type)) {
-}
-
 void RValue::addElement(RValue &&element) & {
   assert(!element.isUsed() && "adding consumed value to r-value");
   assert(!element.isInSpecialState() && "adding special value to r-value");
@@ -509,20 +487,6 @@ void RValue::addElement(RValue &&element) & {
   // recheck that. On the other hand, we need to check the consistency of
   // cleanups and ownership.
   verifyHelper(values);
-}
-
-void RValue::addElement(SILGenFunction &SGF, ManagedValue element,
-                        CanType formalType, SILLocation l) & {
-  assert(element && "adding consumed value to r-value");
-  assert(!element.isInContext() && "adding in-context value to r-value");
-  assert(!isComplete() && "rvalue already complete");
-  assert(!isInSpecialState() && "cannot add elements to an in-context r-value");
-  --elementsToBeAdded;
-
-  ExplodeTupleValue(values, SGF, l).visit(formalType, element);
-
-  assert(!isComplete() || values.size() == getRValueSize(type));
-  verify(SGF);
 }
 
 SILValue RValue::forwardAsSingleValue(SILGenFunction &SGF, SILLocation l) && {

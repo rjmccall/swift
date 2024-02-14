@@ -77,7 +77,7 @@ class RValue {
   std::vector<ManagedValue> values;
   CanType type;
   unsigned elementsToBeAdded;
-  
+
   /// Flag value used to mark an rvalue as invalid.
   ///
   /// The reasons why this can be true is:
@@ -176,13 +176,6 @@ public:
   }
 
   static unsigned getRValueSize(CanType substType);
-  static unsigned getRValueSize(AbstractionPattern origType, CanType substType);
-  
-  /// Create an RValue to which values will be subsequently added using
-  /// addElement(), with the level of tuple expansion in the input specified
-  /// by the abstraction pattern. The RValue will not be complete until all
-  /// the elements have been added.
-  explicit RValue(AbstractionPattern pattern, CanType type);
   
   /// Create an RValue to which values will be subsequently added using
   /// addElement(). The RValue will not be complete until all the elements have
@@ -212,11 +205,6 @@ public:
   
   /// Add an element to the rvalue. The rvalue must not yet be complete.
   void addElement(RValue &&element) &;
-  
-  /// Add a ManagedValue element to the rvalue, exploding tuples if necessary.
-  /// The rvalue must not yet be complete.
-  void addElement(SILGenFunction &SGF, ManagedValue element,
-                  CanType formalType, SILLocation l) &;
   
   /// Forward an rvalue into a single value, imploding tuples if necessary.
   SILValue forwardAsSingleValue(SILGenFunction &SGF, SILLocation l) &&;
