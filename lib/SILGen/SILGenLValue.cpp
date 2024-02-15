@@ -1242,9 +1242,9 @@ static bool isReadNoneFunction(const Expr *e) {
 static bool areCertainlyEqualArgs(const Expr *e1, const Expr *e2) {
   if (e1->getKind() != e2->getKind()) return false;
 
-  // Look through ParenExpr's.
-  if (auto *pe1 = dyn_cast<ParenExpr>(e1)) {
-    auto *pe2 = cast<ParenExpr>(e2);
+  // Look through identity expression.
+  if (auto *pe1 = dyn_cast<IdentityExpr>(e1)) {
+    auto *pe2 = cast<IdentityExpr>(e2);
     return areCertainlyEqualArgs(pe1->getSubExpr(), pe2->getSubExpr());
   }
 
@@ -4471,7 +4471,7 @@ ManagedValue SILGenFunction::emitLoad(SILLocation loc, SILValue addr,
                                 origFormalType.getType(),
                                 substFormalType, rvalueTL.getLoweredType())
       : Conversion::getOrigToSubst(origFormalType, substFormalType,
-                                   rvalueTL.getLoweredType());
+                                   addrRValueType, rvalueTL.getLoweredType());
 
   return emitConvertedRValue(loc, conversion, C,
       [&](SILGenFunction &SGF, SILLocation loc, SGFContext C) {

@@ -2535,28 +2535,18 @@ private:
     RValueStorage(ManagedValue rv) : RV(rv) {}
   };
   struct DefaultArgumentStorage {
-    SILLocation loc;
-    ConcreteDeclRef defaultArgsOwner;
-    unsigned destIndex;
-    CanType resultType;
+    DefaultArgumentExpr *expr;
     AbstractionPattern origResultType;
     ClaimedParamsRef paramsToEmit;
     SILFunctionTypeRepresentation functionRepresentation;
-    bool implicitlyAsync;
 
-    DefaultArgumentStorage(SILLocation loc,
-                           ConcreteDeclRef defaultArgsOwner,
-                           unsigned destIndex,
-                           CanType resultType,
+    DefaultArgumentStorage(DefaultArgumentExpr *expr,
                            AbstractionPattern origResultType,
                            ClaimedParamsRef paramsToEmit,
-                           SILFunctionTypeRepresentation functionRepresentation,
-                           bool implicitlyAsync)
-      : loc(loc), defaultArgsOwner(defaultArgsOwner), destIndex(destIndex),
-        resultType(resultType), origResultType(origResultType),
+                           SILFunctionTypeRepresentation functionRepresentation)
+      : expr(expr), origResultType(origResultType),
         paramsToEmit(paramsToEmit),
-        functionRepresentation(functionRepresentation),
-        implicitlyAsync(implicitlyAsync)
+        functionRepresentation(functionRepresentation)
     {}
   };
   struct BorrowedLValueStorage {
@@ -2681,27 +2671,9 @@ public:
                   AbstractionPattern origParamType,
                   ClaimedParamsRef params,
                   SILFunctionTypeRepresentation functionTypeRepresentation)
-    : DelayedArgument(defArg, defArg->getDefaultArgsOwner(),
-                      defArg->getParamIndex(),
-                      defArg->getType()->getCanonicalType(),
-                      origParamType, params, functionTypeRepresentation,
-                      defArg->isImplicitlyAsync()) {}
-
-  DelayedArgument(SILLocation loc,
-                  ConcreteDeclRef defaultArgsOwner,
-                  unsigned destIndex,
-                  CanType resultType,
-                  AbstractionPattern origResultType,
-                  ClaimedParamsRef params,
-                  SILFunctionTypeRepresentation functionTypeRepresentation,
-                  bool implicitlyAsync)
-    : Kind(DefaultArgument) {
-    Value.emplace<DefaultArgumentStorage>(Kind, loc, defaultArgsOwner,
-                                          destIndex,
-                                          resultType,
-                                          origResultType, params,
-                                          functionTypeRepresentation,
-                                          implicitlyAsync);
+      : Kind(DefaultArgument) {
+    Value.emplace<DefaultArgumentStorage>(Kind, defArg, origParamType,
+                                          params, functionTypeRepresentation);
   }
 
   DelayedArgument(DelayedArgument &&other)
@@ -2736,7 +2708,7 @@ public:
   SILLocation getDefaultArgLoc() const {
     assert(isDefaultArg());
     auto storage = Value.get<DefaultArgumentStorage>(Kind);
-    return storage.loc;
+    return storage.expr;
   }
 
   llvm::Optional<ActorIsolation> getIsolation() const {
@@ -2744,10 +2716,10 @@ public:
       return llvm::None;
 
     auto storage = Value.get<DefaultArgumentStorage>(Kind);
-    if (!storage.implicitlyAsync)
+    if (!storage.expr->isImplicitlyAsync())
       return llvm::None;
 
-    auto callee = storage.defaultArgsOwner.getDecl();
+    auto callee = storage.expr->getDefaultArgsOwner().getDecl();
     return getActorIsolation(callee);
   }
 
@@ -3401,11 +3373,13 @@ public:
     if (arg.isDelayedDefaultArg()) {
       auto defArg = std::move(arg).asKnownDefaultArg();
 
+      // Reserve the right number of spaces in the output argument list.
       auto numParams = getFlattenedValueCount(origParamType,
                                               ImportAsMemberStatus());
+      Args.append(numParams, ManagedValue());
+
       DelayedArguments.emplace_back(defArg, origParamType,
                                     claimNextParameters(numParams), Rep);
-      Args.push_back(ManagedValue());
 
       maybeEmitForeignArgument();
       return;
@@ -3823,6 +3797,7 @@ private:
         case SILFunctionLanguage::Swift:
           return Conversion::getSubstToOrig(origParamType,
                                             arg.getSubstRValueType(),
+                                            loweredSubstArgType,
                                             param.getSILStorageInterfaceType());
         case SILFunctionLanguage::C:
           return Conversion::getBridging(Conversion::BridgeToObjC,
@@ -4042,12 +4017,12 @@ private:
       // Wrap it in a ConversionInitialization if required.
       llvm::Optional<ConvertingInitialization> convertingInit;
       auto substPatternType = patternExpr->getType()->getCanonicalType();
-      auto loweredPatternTy = SGF.getLoweredRValueType(substPatternType);
-      if (loweredPatternTy != expectedElementType.getASTType()) {
+      auto loweredPatternType = SGF.getLoweredType(substPatternType);
+      if (loweredPatternType.getASTType() != expectedElementType.getASTType()) {
         convertingInit.emplace(
             Conversion::getSubstToOrig(
                 origExpansionType.getPackExpansionPatternType(),
-                substPatternType, expectedElementType),
+                substPatternType, loweredPatternTy, expectedElementType),
             SGFContext(innermostInit));
         innermostInit = &*convertingInit;
       }
@@ -4334,6 +4309,15 @@ private:
   }
 };
 
+static RValue emitDefaultArgument(SILGenFunction &SGF, DefaultArgumentExpr *E,
+                                  SGFContext C) {
+  return SGF.emitApplyOfDefaultArgGenerator(E, E->getDefaultArgsOwner(),
+                                            E->getParamIndex(),
+                                            E->getType()->getCanonicalType(),
+                                            E->isImplicitlyAsync(),
+                                            C);
+}
+
 static ManagedValue
 emitDefaultArgument(SILGenFunction &SGF, DefaultArgumentExpr *E,
                     AbstractionPattern origType, SILType expectedTy,
@@ -4341,12 +4325,7 @@ emitDefaultArgument(SILGenFunction &SGF, DefaultArgumentExpr *E,
   return SGF.emitAsOrig(E, origType, E->getType()->getCanonicalType(),
                         expectedTy, origC,
       [&](SILGenFunction &SGF, SILLocation loc, SGFContext C) {
-    auto result =
-      SGF.emitApplyOfDefaultArgGenerator(loc, E->getDefaultArgsOwner(),
-                                         E->getParamIndex(),
-                                         E->getType()->getCanonicalType(),
-                                         E->isImplicitlyAsync(),
-                                         C);
+    auto result = emitDefaultArgument(SGF, E, C);
     if (result.isInContext())
       return ManagedValue::forInContext();
     return std::move(result).getAsSingleValue(SGF, loc);
@@ -4357,32 +4336,32 @@ void DelayedArgument::emitDefaultArgument(SILGenFunction &SGF,
                                           const DefaultArgumentStorage &info,
                                           SmallVectorImpl<ManagedValue> &args,
                                           size_t &argIndex) {
-  // TODO: call emitDefaultArgument above.
-  auto value = SGF.emitApplyOfDefaultArgGenerator(info.loc,
-                                                  info.defaultArgsOwner,
-                                                  info.destIndex,
-                                                  info.resultType,
-                                                  info.implicitlyAsync);
+  auto E = info.expr;
 
+  // Set up an emitter to decompose the result.
   SmallVector<ManagedValue, 4> loweredArgs;
   SmallVector<DelayedArgument, 4> delayedArgs;
-  auto emitter = ArgEmitter(SGF, info.loc, info.functionRepresentation,
+  auto emitter = ArgEmitter(SGF, E, info.functionRepresentation,
                             /*yield*/ false, /*coroutine*/ false,
                             info.paramsToEmit, loweredArgs,
                             delayedArgs, ForeignInfo{});
 
-  emitter.emitSingleArg(ArgumentSource(info.loc, std::move(value)),
+  // Use an rvalue emitter to emit the result into our decomposition.
+  auto emitRValue = [&](SILGenFunction &SGF, SILLocation loc, SGFContext C) {
+    return ::emitDefaultArgument(SGF, E, C);
+  };
+  CanType substType = E->getType()->getCanonicalType();
+  emitter.emitSingleArg(ArgumentSource(E, substType, emitRValue),
                         info.origResultType);
-  assert(delayedArgs.empty());
-  
-  // Splice the emitted default argument into the argument list.
-  if (loweredArgs.size() == 1) {
-    args[argIndex++] = loweredArgs.front();
-  } else {
-    args.erase(args.begin() + argIndex);
-    args.insert(args.begin() + argIndex,
-                loweredArgs.begin(), loweredArgs.end());
-    argIndex += loweredArgs.size();
+
+  assert(delayedArgs.empty() && "can't have introduced more delayed args");
+
+  // Move the decomposition into the argument list.  We should have reserved
+  // the right amount of space in the argument list when we added this delayed
+  // argument.
+  for (auto arg : loweredArgs) {
+    assert(!args[argIndex].isValid());
+    args[argIndex++] = arg;
   }
 }
 
@@ -7264,13 +7243,9 @@ ManagedValue SILGenFunction::emitAsyncLetStart(
       origParamType);
   
   auto conversion = Conversion::getSubstToOrig(origParam, substParamType,
+                                     getLoweredType(substParamType),
                                      getLoweredType(origParam, substParamType));
-  ConvertingInitialization convertingInit(conversion, SGFContext());
-  auto taskFunction = emitRValue(asyncLetEntryPoint,
-                                 SGFContext(&convertingInit))
-    .getAsSingleValue(*this, loc);
-  taskFunction = emitSubstToOrigValue(loc, taskFunction,
-                                      origParam, substParamType);
+  auto taskFunction = emitConvertedRValue(asyncLetEntryPoint, conversion);
 
   auto apply = B.createBuiltin(
       loc,

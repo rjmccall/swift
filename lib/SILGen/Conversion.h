@@ -78,7 +78,8 @@ private:
   struct ReabstractionTypes {
     AbstractionPattern OrigType;
     CanType SubstType;
-    SILType LoweredResultType;
+    SILType FromTy;
+    SILType ToTy;
   };
 
   using Members = ExternalUnionMembers<BridgingTypes, ReabstractionTypes>;
@@ -111,23 +112,23 @@ private:
   }
 
   Conversion(KindTy kind, AbstractionPattern origType, CanType substType,
-             SILType loweredResultTy)
+             SILType fromTy, SILType toTy)
       : Kind(kind) {
     Types.emplaceAggregate<ReabstractionTypes>(kind, origType, substType,
-                                               loweredResultTy);
+                                               fromTy, toTy);
   }
 
 public:
   static Conversion getOrigToSubst(AbstractionPattern origType,
                                    CanType substType,
-                                   SILType loweredResultTy) {
-    return Conversion(OrigToSubst, origType, substType, loweredResultTy);
+                                   SILType fromTy, SILType toTy) {
+    return Conversion(OrigToSubst, origType, substType, fromTy, toTy);
   }
 
   static Conversion getSubstToOrig(AbstractionPattern origType,
                                    CanType substType,
-                                   SILType loweredResultTy) {
-    return Conversion(SubstToOrig, origType, substType, loweredResultTy);
+                                   SILType fromTy, SILType toTy) {
+    return Conversion(SubstToOrig, origType, substType, fromTy, toTy);
   }
 
   static Conversion getBridging(KindTy kind, CanType origType,
@@ -149,6 +150,13 @@ public:
     return isReabstractionKind(getKind());
   }
 
+  bool isTrivial() const {
+    // For now, assume bridging conversions are never trivial.
+    if (!isReabstraction()) return false;
+    return getReabstractionFromType().getASTType() ==
+           getReabstractionToType().getASTType();
+  }
+
   AbstractionPattern getReabstractionOrigType() const {
     return Types.get<ReabstractionTypes>(Kind).OrigType;
   }
@@ -157,8 +165,11 @@ public:
     return Types.get<ReabstractionTypes>(Kind).SubstType;
   }
 
-  SILType getReabstractionLoweredResultType() const {
-    return Types.get<ReabstractionTypes>(Kind).LoweredResultType;
+  SILType getReabstractionFromType() const {
+    return Types.get<ReabstractionTypes>(Kind).FromTy;
+  }
+  SILType getReabstractionToType() const {
+    return Types.get<ReabstractionTypes>(Kind).ToTy;
   }
 
   bool isBridgingExplicit() const {
@@ -219,6 +230,8 @@ public:
   }
 
   Kind getKind() const { return TheKind; }
+
+  bool isIdentity() const { return getKind() == Identity; }
 
   /// Does the value need to be forced before the conversion?
   /// This comes up with result conversions where the result was imported

@@ -35,6 +35,10 @@ RValue ArgumentSource::getAsRValue(SILGenFunction &SGF, SGFContext C) && {
     llvm_unreachable("cannot get l-value as r-value");
   case Kind::RValue:
     return std::move(*this).asKnownRValue(SGF);
+  case Kind::RValueEmitter: {
+    auto loc = getKnownRValueEmitterLocation();
+    return std::move(*this).asKnownRValueEmitter()(SGF, loc, C);
+  }
   case Kind::Expr:
     return SGF.emitRValue(std::move(*this).asKnownExpr(), C);
   }
@@ -62,6 +66,18 @@ ManagedValue ArgumentSource::getAsSingleValue(SILGenFunction &SGF,
       return std::move(*this).asKnownRValue(SGF).getAsSingleValue(SGF, loc);
     }
   }
+  case Kind::RValueEmitter: {
+    auto loc = getKnownRValueEmitterLocation();
+    auto rvalue = std::move(*this).asKnownRValueEmitter()(SGF, loc, C);
+    if (rvalue.isInContext()) {
+      return ManagedValue::forInContext();
+    } else if (auto init = C.getEmitInto()) {
+      std::move(rvalue).forwardInto(SGF, loc, init);
+      return ManagedValue::forInContext();
+    } else {
+      return std::move(rvalue).getAsSingleValue(SGF, loc);
+    }
+  }
   case Kind::Expr: {
     auto e = std::move(*this).asKnownExpr();
     if (e->isSemanticallyInOutExpr()) {
@@ -82,7 +98,9 @@ ManagedValue ArgumentSource::getAsSingleValue(SILGenFunction &SGF,
                                               SGFContext C) && {
   auto substFormalType = getSubstRValueType();
   auto conversion =
-    Conversion::getSubstToOrig(origFormalType, substFormalType, loweredTy);
+    Conversion::getSubstToOrig(origFormalType, substFormalType,
+                               SGF.getLoweredType(substFormalType),
+                               loweredTy);
   return std::move(*this).getConverted(SGF, conversion, C);
 }
 
@@ -95,6 +113,7 @@ ManagedValue ArgumentSource::getConverted(SILGenFunction &SGF,
   case Kind::LValue:
     llvm_unreachable("cannot get converted l-value");
   case Kind::RValue:
+  case Kind::RValueEmitter:
   case Kind::Expr:
     return SGF.emitConvertedRValue(getLocation(), conversion, C,
                 [&](SILGenFunction &SGF, SILLocation loc, SGFContext C) {
@@ -113,6 +132,14 @@ void ArgumentSource::forwardInto(SILGenFunction &SGF, Initialization *dest) && {
   case Kind::RValue: {
     auto loc = getKnownRValueLocation();
     std::move(*this).asKnownRValue(SGF).ensurePlusOne(SGF, loc).forwardInto(SGF, loc, dest);
+    return;
+  }
+  case Kind::RValueEmitter: {
+    auto loc = getKnownRValueEmitterLocation();
+    auto rvalue =
+      std::move(*this).asKnownRValueEmitter()(SGF, loc, SGFContext(dest));
+    if (!rvalue.isInContext())
+      std::move(rvalue).forwardInto(SGF, loc, dest);
     return;
   }
   case Kind::Expr: {
@@ -139,6 +166,9 @@ ArgumentSource ArgumentSource::borrow(SILGenFunction &SGF) const & {
   case Kind::RValue: {
     auto loc = getKnownRValueLocation();
     return ArgumentSource(loc, asKnownRValue().borrow(SGF, loc));
+  }
+  case Kind::RValueEmitter: {
+    llvm_unreachable("cannot borrow an unemitted r-value");
   }
   case Kind::Expr: {
     llvm_unreachable("cannot borrow an expression");
@@ -242,6 +272,9 @@ void ArgumentSource::dump(raw_ostream &out, unsigned indent) const {
     out << "RValue\n";
     Storage.get<RValueStorage>(StoredKind).Value.dump(out, indent + 2);
     return;
+  case Kind::RValueEmitter:
+    out << "RValueEmitter\n";
+    return;
   case Kind::Expr:
     out << "Expr\n";
     Storage.get<Expr*>(StoredKind)->dump(out); // FIXME: indent
@@ -298,6 +331,8 @@ bool ArgumentSource::isObviouslyEqual(const ArgumentSource &other) const {
     llvm_unreachable("argument source is invalid");
   case Kind::RValue:
     return asKnownRValue().isObviouslyEqual(other.asKnownRValue());
+  case Kind::RValueEmitter:
+    return false;
   case Kind::LValue:
     return false; // TODO?
   case Kind::Expr:
@@ -325,6 +360,9 @@ ArgumentSource ArgumentSource::copyForDiagnostics() const {
   case Kind::LValue:
     // We have no way to copy an l-value for diagnostics.
     return {getKnownLValueLocation(), LValue()};
+  case Kind::RValueEmitter:
+    // We have no way to copy an r-value emitter for diagnostics.
+    return {getKnownRValueEmitterLocation(), RValue()};
   case Kind::RValue:
     return {getKnownRValueLocation(), asKnownRValue().copyForDiagnostics()};
   case Kind::Expr:
@@ -377,9 +415,14 @@ ArgumentSourceExpansion::ArgumentSourceExpansion(SILGenFunction &SGF,
     rvalues.Loc = expr;
     auto rvalue = SGF.emitRValue(expr);
     std::move(rvalue).extractElements(rvalues.Elements);
-  } else {
+  } else if (arg.isRValue()) {
     rvalues.Loc = arg.getKnownRValueLocation();
     std::move(arg).asKnownRValue(SGF).extractElements(rvalues.Elements);
+  } else {
+    assert(arg.isRValueEmitter());
+    rvalues.Loc = arg.getKnownRValueEmitterLocation();
+    std::move(arg).asKnownRValueEmitter()(SGF, rvalues.Loc, SGFContext())
+                  .extractElements(rvalues.Elements);
   }
   assert(rvalues.Elements.size() == NumRemainingElements);
 }

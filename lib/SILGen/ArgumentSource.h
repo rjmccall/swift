@@ -49,11 +49,18 @@ class Conversion;
 /// working with multiple ArgumentSources should document the order in
 /// which they plan to evaluate them.
 class ArgumentSource {
+public:
+  using RValueEmitterRef = llvm::function_ref<RValue (SILGenFunction &SGF,
+                                                      SILLocation loc,
+                                                      SGFContext C)>;
+
+private:
   enum class Kind : uint8_t {
     Invalid,
     RValue,
     LValue,
     Expr,
+    RValueEmitter,
   };
 
   struct RValueStorage {
@@ -64,17 +71,28 @@ class ArgumentSource {
     LValue Value;
     SILLocation Loc;
   };
+  struct RValueEmitterStorage {
+    RValueEmitterRef Emitter;
+    SILLocation Loc;
+    CanType SubstType;
+  };
 
   using StorageMembers =
-    ExternalUnionMembers<void, RValueStorage, LValueStorage, Expr*>;
+    ExternalUnionMembers<void, RValueStorage, LValueStorage, Expr*,
+                         RValueEmitterStorage>;
 
   static StorageMembers::Index getStorageIndexForKind(Kind kind) {
     switch (kind) {
-    case Kind::Invalid: return StorageMembers::indexOf<void>();
+    case Kind::Invalid:
+      return StorageMembers::indexOf<void>();
     case Kind::RValue:
       return StorageMembers::indexOf<RValueStorage>();
-    case Kind::LValue: return StorageMembers::indexOf<LValueStorage>();
-    case Kind::Expr: return StorageMembers::indexOf<Expr*>();
+    case Kind::LValue:
+      return StorageMembers::indexOf<LValueStorage>();
+    case Kind::Expr:
+      return StorageMembers::indexOf<Expr*>();
+    case Kind::RValueEmitter:
+      return StorageMembers::indexOf<RValueEmitterStorage>();
     }
     llvm_unreachable("bad kind");
   }
@@ -90,10 +108,16 @@ public:
   ArgumentSource(SILLocation loc, LValue &&value) : StoredKind(Kind::LValue) {
     Storage.emplaceAggregate<LValueStorage>(StoredKind, std::move(value), loc);
   }
+  ArgumentSource(SILLocation loc, CanType type, RValueEmitterRef emitRValue)
+      : StoredKind(Kind::RValueEmitter) {
+    Storage.emplaceAggregate<RValueEmitterStorage>(StoredKind,
+                                                   emitRValue, loc, type);
+  }
   ArgumentSource(Expr *e) : StoredKind(Kind::Expr) {
     assert(e && "initializing ArgumentSource with null expression");
     Storage.emplace<Expr*>(StoredKind, e);
   }
+
   // Cannot be copied.
   ArgumentSource(const ArgumentSource &other) = delete;
   ArgumentSource &operator=(const ArgumentSource &other) = delete;
@@ -125,6 +149,8 @@ public:
       return asKnownLValue().isValid();
     case Kind::Expr:
       return asKnownExpr() != nullptr;
+    case Kind::RValueEmitter:
+      return true;
     }
     llvm_unreachable("bad kind");
   }
@@ -139,6 +165,8 @@ public:
       return asKnownLValue().getSubstFormalType();
     case Kind::Expr:
       return asKnownExpr()->getType()->getInOutObjectType()->getCanonicalType();
+    case Kind::RValueEmitter:
+      return getKnownRValueEmitterSubstType();
     }
     llvm_unreachable("bad kind");
   }
@@ -147,6 +175,7 @@ public:
     switch (StoredKind) {
     case Kind::Invalid: llvm_unreachable("argument source is invalid");
     case Kind::RValue:
+    case Kind::RValueEmitter:
       return false;
     case Kind::LValue: return true;
     case Kind::Expr: return asKnownExpr()->isSemanticallyInOutExpr();
@@ -164,12 +193,15 @@ public:
       return getKnownLValueLocation();
     case Kind::Expr:
       return asKnownExpr();
+    case Kind::RValueEmitter:
+      return getKnownRValueEmitterLocation();
     }
     llvm_unreachable("bad kind");
   }
 
   bool isExpr() const & { return StoredKind == Kind::Expr; }
   bool isRValue() const & { return StoredKind == Kind::RValue; }
+  bool isRValueEmitter() const & { return StoredKind == Kind::RValueEmitter; }
   bool isLValue() const & { return StoredKind == Kind::LValue; }
 
   /// Whether this argument is for a default argument that should be delayed.
@@ -179,6 +211,7 @@ public:
     switch (StoredKind) {
     case Kind::Invalid:
       llvm_unreachable("argument source is invalid");
+    case Kind::RValueEmitter:
     case Kind::RValue:
     case Kind::LValue:
       return false;
@@ -208,6 +241,19 @@ public:
   }
   SILLocation getKnownRValueLocation() const & {
     return Storage.get<RValueStorage>(StoredKind).Loc;
+  }
+
+  RValueEmitterRef asKnownRValueEmitter() && {
+    auto value = Storage.get<RValueEmitterStorage>(StoredKind).Emitter;
+    Storage.resetToEmpty<RValueEmitterStorage>(StoredKind, Kind::Invalid);
+    StoredKind = Kind::Invalid;
+    return value;
+  }
+  SILLocation getKnownRValueEmitterLocation() const & {
+    return Storage.get<RValueEmitterStorage>(StoredKind).Loc;
+  }
+  CanType getKnownRValueEmitterSubstType() const & {
+    return Storage.get<RValueEmitterStorage>(StoredKind).SubstType;
   }
 
   /// Given that this source is storing an LValue, extract and clear

@@ -2028,12 +2028,9 @@ RValue RValueEmitter::visitFunctionConversionExpr(FunctionConversionExpr *e,
     auto substType = subExpr->getType()->getCanonicalType();
     
     auto conversion = Conversion::getSubstToOrig(*origType, substType,
+                                      SGF.getLoweredType(substType),
                                       SGF.getLoweredType(*origType, substType));
-    ConvertingInitialization convertingInit(conversion, SGFContext());
-    auto closure = SGF.emitRValue(subExpr,
-                                  SGFContext(&convertingInit))
-      .getAsSingleValue(SGF, e);
-    closure = SGF.emitSubstToOrigValue(e, closure, *origType, substType);
+    auto closure = SGF.emitConvertedRValue(subExpr, conversion);
 
     return RValue(SGF, e, closure);
   }

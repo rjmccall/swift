@@ -1662,7 +1662,8 @@ void SILGenFunction::emitMemberInitializer(DeclContext *dc, VarDecl *selfDecl,
 
     if (needsConvertingInit) {
       Conversion conversion =
-          Conversion::getSubstToOrig(origType, substType, loweredResultTy);
+          Conversion::getSubstToOrig(origType, substType,
+                                     loweredSubstTy, loweredResultTy);
 
       ConvertingInitialization convertingInit(conversion,
                                               SGFContext(memberInit.get()));

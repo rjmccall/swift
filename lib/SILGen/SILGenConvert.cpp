@@ -1034,7 +1034,8 @@ ManagedValue SILGenFunction::emitAsOrig(SILLocation loc,
                                         ValueProducerRef produceValue) {
   // If the lowered substituted type already matches the substitution,
   // we can just emit directly.
-  if (getLoweredType(substType).getASTType() == expectedTy.getASTType()) {
+  auto resultTy = getLoweredType(substType);
+  if (resultTy.getASTType() == expectedTy.getASTType()) {
     auto result = produceValue(*this, loc, C);
 
     // For convenience, force the result into the destination.
@@ -1046,7 +1047,7 @@ ManagedValue SILGenFunction::emitAsOrig(SILLocation loc,
   }
 
   auto conversion =
-    Conversion::getSubstToOrig(origType, substType, expectedTy);
+    Conversion::getSubstToOrig(origType, substType, resultTy, expectedTy);
   auto result = emitConvertedRValue(loc, conversion, C, produceValue);
 
   // emitConvertedRValue always forces results into the context.
@@ -1067,6 +1068,10 @@ ManagedValue SILGenFunction::emitConvertedRValue(SILLocation loc,
                                                  const Conversion &conversion,
                                                  SGFContext C,
                                                  ValueProducerRef produceValue){
+  // If the conversion is trivial, ignore it.
+  if (conversion.isTrivial())
+    return produceValue(*this, loc, C);
+
   // If we're emitting into a converting context, check whether we can
   // peephole the conversions together.
   if (auto outerConversion = C.getAsConversion()) {
@@ -1510,17 +1515,10 @@ Lowering::canPeepholeConversions(SILGenFunction &SGF,
     switch (innerConversion.getKind()) {
     case Conversion::OrigToSubst:
     case Conversion::SubstToOrig:
-      if (innerConversion.getKind() == outerConversion.getKind())
-        break;
-
-      if (innerConversion.getReabstractionOrigType().getCachingKey() !=
-          outerConversion.getReabstractionOrigType().getCachingKey() ||
-          innerConversion.getReabstractionSubstType() !=
-          outerConversion.getReabstractionSubstType()) {
-        break;
-      }
-
-      return ConversionPeepholeHint(ConversionPeepholeHint::Identity, false);
+      if (innerConversion.getReabstractionFromTy().getASTType() ==
+          outerConversion.getReabstractionToTy().getASTType())
+        return ConversionPeepholeHint(ConversionPeepholeHint::Identity, false);
+      break;
 
     default:
       break;

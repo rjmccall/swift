@@ -306,7 +306,7 @@ public:
                                          loweredResultTy);
         } else {
           return Conversion::getOrigToSubst(origType, substType,
-                                            loweredResultTy);
+                                            value.getType(), loweredResultTy);
         }
       }();
 
@@ -1229,16 +1229,48 @@ ResultPlanPtr ResultPlanBuilder::buildForScalar(Initialization *init,
                                                 CanType substType,
                                                 SILResultInfo result) {
   auto calleeTy = calleeTypeInfo.substFnType;
+
+  // The type of the actual result.
+  auto resultTy = result.getSILStorageType(SGF.SGM.M, calleeTy,
+                                           SGF.getTypeExpansionContext());
+
+  // The type we apparently formally want.
+  auto expectedResultTy = SGF.getLoweredType(substType);
+
+  bool requiresReabstraction =
+    expectedResultTy.hasAbstractionDifference(calleeTypeInfo.getOverrideRep(),
+                                              resultTy);
+
+  // If we need to reabstract, check to see if we're emitting into a
+  // converting context.
+  ConvertingInitialization *convertingInit = nullptr;
+  if (requiresReabstraction && init &&
+      (convertingInit = init->getAsConversion())) {
+    auto origToSubst = Conversion::getOrigToSubst(origType, substType,
+                                                  resultTy, expectedResultTy);
+
+    // If the peephole turns this into an identity conversion,
+    // just emit into the parent context; we no longer require reabstraction.
+    auto peepholeResult =
+      canPeepholeConversions(SGF, convertingInit->getConversion(),
+                             origToSubst);
+    if (peepholeResult && peepholeResult->isIdentity()) {
+
+      init = convertingInit->getFinalContext().getEmitInto();
+      requiresReabstraction = false;
+
+    // Otherwise, forget that we have a converting init.
+    } else {
+      convertingInit = nullptr;
+    }
+  }
   
   // If the result is indirect, and we have an address to emit into, and
   // there are no abstraction differences, then just do it.
   if (init && init->canPerformInPlaceInitialization() &&
-      SGF.silConv.isSILIndirect(result) &&
-      !SGF.getLoweredType(substType).getAddressType().hasAbstractionDifference(
-          calleeTypeInfo.getOverrideRep(),
-          result.getSILStorageType(SGF.SGM.M, calleeTy,
-                                   SGF.getTypeExpansionContext()))) {
-    return ResultPlanPtr(new InPlaceInitializationResultPlan(init));
+      SGF.silConv.isSILIndirect(result) && !requiresReabstraction) {
+    return ResultPlanPtr(
+        new InPlaceInitializationResultPlan(init));
   }
 
   // Otherwise, we need to:

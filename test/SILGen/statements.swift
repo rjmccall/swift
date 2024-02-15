@@ -774,4 +774,3 @@ func let_else_tuple_binding(_ a : (Int, Int)?) -> Int {
   // CHECK-NEXT:   debug_value [[PAYLOAD_2]] : $Int, let, name "y"
   // CHECK-NEXT:   return [[PAYLOAD_1]] : $Int
 }
-

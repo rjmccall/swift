@@ -461,9 +461,11 @@ static void wrapInSubstToOrigInitialization(SILGenFunction &SGF,
                                     AbstractionPattern origType,
                                     CanType substType,
                                     SILType expectedTy) {
-  if (expectedTy.getASTType() != SGF.getLoweredRValueType(substType)) {
+  auto loweredSubstTy = SGF.getLoweredType(substType);
+  if (expectedTy.getASTType() != loweredSubstTy.getASTType()) {
     auto conversion =
-      Conversion::getSubstToOrig(origType, substType, expectedTy);
+      Conversion::getSubstToOrig(origType, substType,
+                                 loweredSubstTy, expectedTy);
     auto convertingInit = new ConvertingInitialization(conversion,
                                                        std::move(init));
     init.reset(convertingInit);
@@ -732,11 +734,12 @@ void SILGenFunction::emitReturnExpr(SILLocation branchLoc,
     
     // Does the return context require reabstraction?
     RValue RV;
-    
-    auto loweredRetTy = getLoweredType(origRetTy, retTy);
-    if (loweredRetTy != getLoweredType(retTy)) {
+
+    auto loweredRetTy = getLoweredType(retTy);
+    auto expectedTy = getLoweredType(origRetTy, retTy);
+    if (loweredRetTy.getASTType() != loweredRetTy.getASTType()) {
       auto conversion = Conversion::getSubstToOrig(origRetTy, retTy,
-                                                   loweredRetTy);
+                                                   loweredRetTy, expectedTy);
       RV = RValue(*this, ret, emitConvertedRValue(ret, conversion));
     } else {
       RV = emitRValue(ret);

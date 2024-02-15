@@ -470,3 +470,8 @@ struct KeyPathLiteralAsFunctionDefaultArg {
 }
 
 KeyPathLiteralAsFunctionDefaultArg(x: 1738).doStuff()
+
+func takeDefaultedFunction<T>(value: T, fn: (T) -> () = {}) {}
+func testReabstraction() {
+  takeDefaultedFunction(value: 0)
+}
