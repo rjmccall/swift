@@ -2708,21 +2708,18 @@ ConvertFunctionInst *ConvertFunctionInst::create(
   auto *CFI = ::new (Buffer)
       ConvertFunctionInst(DebugLoc, Operand, TypeDependentOperands, Ty,
                           WithoutActuallyEscaping, forwardingOwnershipKind);
+#ifndef NDEBUG
   // If we do not have lowered SIL, make sure that are not performing
   // ABI-incompatible conversions.
-  //
-  // *NOTE* We purposely do not use an early return here to ensure that in
-  // builds without assertions this whole if statement is optimized out.
   if (Mod.getStage() != SILStage::Lowered) {
-    // Make sure we are not performing ABI-incompatible conversions.
-    CanSILFunctionType opTI =
+    CanSILFunctionType opTy =
         CFI->getOperand()->getType().castTo<SILFunctionType>();
-    (void)opTI;
-    CanSILFunctionType resTI = CFI->getType().castTo<SILFunctionType>();
-    (void)resTI;
-    assert((!F || opTI->isABICompatibleWith(resTI, *F).isCompatible()) &&
+    CanSILFunctionType resTy = CFI->getType().castTo<SILFunctionType>();
+
+    assert(Mod.Types.canConvertWithConvertFunction(Mod, opTy, resTy) &&
            "Can not convert in between ABI incompatible function types");
   }
+#endif
   return CFI;
 }
 

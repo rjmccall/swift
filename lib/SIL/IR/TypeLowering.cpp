@@ -4393,30 +4393,16 @@ TypeConverter::checkForABIDifferences(SILModule &M,
       type2.getASTType()->satisfiesClassConstraint())
     return ABIDifference::CompatibleRepresentation;
 
-  // Function parameters are ABI compatible if their differences are
-  // trivial.
+  // Functions are ABI compatible if they have the same representation and
+  // their functions use the same ABI.
   if (auto fnTy1 = type1.getAs<SILFunctionType>()) {
     if (auto fnTy2 = type2.getAs<SILFunctionType>()) {
-      // Async/synchronous conversions always need a thunk.
-      if (fnTy1->isAsync() != fnTy2->isAsync())
-        return ABIDifference::NeedsThunk;
-      // Usin an async function without an error result in place of an async
-      // function that needs an error result is not ABI compatible.
-      if (fnTy2->isAsync() && !fnTy1->hasErrorResult() &&
-          fnTy2->hasErrorResult())
-        return ABIDifference::NeedsThunk;
-
-      // @convention(block) is a single retainable pointer so optionality
-      // change is allowed.
-      if (optionalityChange)
-        if (fnTy1->getRepresentation() != fnTy2->getRepresentation() ||
-            fnTy1->getRepresentation() != SILFunctionTypeRepresentation::Block)
-          return ABIDifference::NeedsThunk;
-
+      // All of our function representations are designed to allow trivial
+      // promotion to optional, so we can ignore optionality changes here.
       return checkFunctionForABIDifferences(M, fnTy1, fnTy2);
     }
   }
-  
+
   // Metatypes are ABI-compatible if they have the same representation.
   if (auto meta1 = type1.getAs<MetatypeType>()) {
     if (auto meta2 = type2.getAs<MetatypeType>()) {
@@ -4426,7 +4412,7 @@ TypeConverter::checkForABIDifferences(SILModule &M,
         return ABIDifference::CompatibleRepresentation;
     }
   }
-  
+
   // Existential metatypes which are not identical are only ABI-compatible
   // in @objc representation.
   //
@@ -4532,26 +4518,21 @@ TypeConverter::ABIDifference
 TypeConverter::checkFunctionForABIDifferences(SILModule &M,
                                               SILFunctionType *fnTy1,
                                               SILFunctionType *fnTy2) {
-  // For now, only differentiate representation from calling convention when
-  // staging in substituted function types.
-  //
-  // We might still want to conditionalize this behavior even after we commit
-  // substituted function types, to avoid bloating
-  // IR for platforms that don't differentiate function type representations.
-  bool DifferentFunctionTypesHaveDifferentRepresentation = true;
-  
-  // TODO: For C language types we should consider the attached Clang types.
-  if (fnTy1->getLanguage() == SILFunctionLanguage::C)
-    DifferentFunctionTypesHaveDifferentRepresentation = false;
-  
   // Fast path -- if both functions were unwrapped from a CanSILFunctionType,
   // we might have pointer equality here.
   if (fnTy1 == fnTy2)
     return ABIDifference::CompatibleRepresentation;
 
+  // We start by recognizing a long list of conditions that force the
+  // use of a thunk.
+
   // Force unimplementable functions into the thunk path so that we don't
   // have to worry about diagnosing this in a ton of different places.
   if (fnTy1->isUnimplementable() || fnTy2->isUnimplementable())
+    return ABIDifference::NeedsThunk;
+
+  // Async/synchronous conversions always need a thunk.
+  if (fnTy1->isAsync() != fnTy2->isAsync())
     return ABIDifference::NeedsThunk;
 
   // Erased isolation is a restriction on the context value, so we can
@@ -4604,9 +4585,16 @@ TypeConverter::checkFunctionForABIDifferences(SILModule &M,
       return ABIDifference::NeedsThunk;
   }
 
-  // If one type does not have an error result, we can still trivially cast
-  // (casting away an error result is only safe if the function never throws,
-  // of course).
+  // If the functions differ in whether they have an error result, the
+  // conversion requires a thunk only if the functions are async.  We've
+  // designed the synchronous throwing calling convention to allow trivial
+  // bitcasting, even for typed throws.
+  if (fnTy1->hasErrorResult() != fnTy2->hasErrorResult() &&
+      fnTy1->isAsync())
+    return ABIDifference::NeedsThunk;
+
+  // If both functions are throwing, they need to agree in error types and
+  // conventions.
   if (fnTy1->hasErrorResult() && fnTy2->hasErrorResult()) {
     auto error1 = fnTy1->getErrorResult(), error2 = fnTy2->getErrorResult();
 
@@ -4622,12 +4610,6 @@ TypeConverter::checkFunctionForABIDifferences(SILModule &M,
         ABIDifference::CompatibleRepresentation)
       return ABIDifference::NeedsThunk;
   }
-
-  // Asynchronous functions require a thunk if they differ in whether they
-  // have an error result.
-  if (fnTy1->hasErrorResult() != fnTy2->hasErrorResult() &&
-      (fnTy1->isAsync() || fnTy2->isAsync()))
-    return ABIDifference::NeedsThunk;
 
   for (unsigned i = 0, e = fnTy1->getParameters().size(); i < e; ++i) {
     auto param1 = fnTy1->getParameters()[i], param2 = fnTy2->getParameters()[i];
@@ -4646,6 +4628,18 @@ TypeConverter::checkFunctionForABIDifferences(SILModule &M,
         ABIDifference::CompatibleRepresentation)
       return ABIDifference::NeedsThunk;
   }
+
+  // For now, only differentiate representation from calling convention when
+  // staging in substituted function types.
+  //
+  // We might still want to conditionalize this behavior even after we commit
+  // substituted function types, to avoid bloating
+  // IR for platforms that don't differentiate function type representations.
+  bool DifferentFunctionTypesHaveDifferentRepresentation = true;
+
+  // TODO: For C language types we should consider the attached Clang types.
+  if (fnTy1->getLanguage() == SILFunctionLanguage::C)
+    DifferentFunctionTypesHaveDifferentRepresentation = false;
 
   auto rep1 = fnTy1->getRepresentation(), rep2 = fnTy2->getRepresentation();
   if (rep1 != rep2) {

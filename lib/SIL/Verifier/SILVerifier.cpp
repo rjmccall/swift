@@ -756,6 +756,41 @@ static void checkAddressWalkerCanVisitAllTransitiveUses(SILValue address) {
   llvm::report_fatal_error("invoking standard assertion failure");
 }
 
+static void beginVerificationFailure(const SILFunction &F) {
+  auto &out = llvm::dbgs();
+
+  if (ContinueOnFailure) {
+    out << "Begin Error in function " << F.getName() << "\n";
+  }
+
+  out << "SIL verification failed: ";
+}
+
+static void endVerificationFailure(const SILFunction &F) {
+  auto &out = llvm::dbgs();
+
+  if (ContinueOnFailure) {
+    out << "End Error in function " << F.getName() << "\n";
+    return;
+  }
+
+  out << "In function:\n";
+  F.print(out);
+
+  if (DumpModuleOnFailure) {
+    // Don't do this by default because modules can be _very_ large.
+    out << "In module:\n";
+    F.getModule().print(out);
+  }
+
+  // We abort by default because we want to always crash in
+  // the debugger.
+  if (AbortOnFailure)
+    abort();
+  else
+    exit(1);
+}
+
 /// The SIL verifier walks over a SIL function / basic block / instruction,
 /// checking and enforcing its invariants.
 class SILVerifier : public SILVerifierBase<SILVerifier> {
@@ -813,19 +848,12 @@ public:
   }
 
   void _require(bool condition, const Twine &complaint,
-                const std::function<void()> &extraContext = nullptr) {
+                llvm::function_ref<void()> extraContext = nullptr) {
     if (condition) return;
 
-    StringRef funcName;
-    if (CurInstruction)
-      funcName = CurInstruction->getFunction()->getName();
-    else if (CurArgument)
-      funcName = CurArgument->getFunction()->getName();
-    if (ContinueOnFailure) {
-      llvm::dbgs() << "Begin Error in function " << funcName << "\n";
-    }
+    beginVerificationFailure(F);
 
-    llvm::dbgs() << "SIL verification failed: " << complaint << "\n";
+    llvm::dbgs() << complaint << "\n";
     if (extraContext)
       extraContext();
 
@@ -836,25 +864,8 @@ public:
       llvm::dbgs() << "Verifying argument:\n";
       CurArgument->printInContext(llvm::dbgs());
     }
-    if (ContinueOnFailure) {
-      llvm::dbgs() << "End Error in function " << funcName << "\n";
-      return;
-    }
 
-    llvm::dbgs() << "In function:\n";
-    F.print(llvm::dbgs());
-    if (DumpModuleOnFailure) {
-      // Don't do this by default because modules can be _very_ large.
-      llvm::dbgs() << "In module:\n";
-      F.getModule().print(llvm::dbgs());
-    }
-
-    // We abort by default because we want to always crash in
-    // the debugger.
-    if (AbortOnFailure)
-      abort();
-    else
-      exit(1);
+    endVerificationFailure(F);
   }
 #define require(condition, complaint) \
   _require(bool(condition), complaint ": " #condition)
@@ -963,37 +974,24 @@ public:
              [&] { llvm::dbgs() << "  " << type1 << "\n  " << type2 << '\n'; });
   }
 
-  /// Require two function types to be ABI-compatible.
   void requireABICompatibleFunctionTypes(CanSILFunctionType type1,
                                          CanSILFunctionType type2,
-                                         const Twine &what,
-                                         SILFunction &inFunction) {
-    auto complain = [=](const char *msg) -> std::function<void()> {
-      return [=]{
-        llvm::dbgs() << "  " << msg << '\n'
-                     << "  " << type1 << "\n  " << type2 << '\n';
-      };
-    };
-    auto complainBy = [=](std::function<void()> msg) -> std::function<void()> {
-      return [=]{
-        msg();
-        llvm::dbgs() << '\n';
-        llvm::dbgs() << "  " << type1 << "\n  " << type2 << '\n';
-      };
-    };
-
-    // If we didn't have a failure, return.
-    auto Result = type1->isABICompatibleWith(type2, inFunction);
-    if (Result.isCompatible())
+                                         const Twine &what) {
+    auto &M = F.getModule();
+    using ABIDifference = Lowering::TypeConverter::ABIDifference;
+    auto difference = M.Types.checkFunctionForABIDifferences(M, type1, type2);
+    switch (difference) {
+    case ABIDifference::CompatibleRepresentation:
+    case ABIDifference::CompatibleCallingConvention:
       return;
 
-    if (!Result.hasPayload()) {
-      _require(false, what, complain(Result.getMessage().data()));
-    } else {
-      _require(false, what, complainBy([=] {
-                 llvm::dbgs() << " " << Result.getMessage().data()
-                              << ".\nParameter: " << Result.getPayload();
-               }));
+    case ABIDifference::CompatibleRepresentation_ThinToThick:
+    case ABIDifference::CompatibleCallingConvention_ThinToThick:
+    case ABIDifference::NeedsThunk:
+      _require(false, what, [=] {
+        llvm::dbgs() << "\n  converting from type: " << type1
+                     << "\n  to type: " << type2 << '\n';
+      });
     }
   }
 
@@ -4909,8 +4907,7 @@ public:
 
     // convert_function is required to be an ABI-compatible conversion.
     requireABICompatibleFunctionTypes(
-        opTI, resTI, "convert_function cannot change function ABI",
-        *ICI->getFunction());
+        opTI, resTI, "convert_function cannot change function ABI");
   }
 
   void checkConvertEscapeToNoEscapeInst(ConvertEscapeToNoEscapeInst *ICI) {
@@ -4926,8 +4923,7 @@ public:
     // conversion once escapability is the same on both sides.
     requireABICompatibleFunctionTypes(
         opTI, resTI->getWithExtInfo(resTI->getExtInfo().withNoEscape(false)),
-        "convert_escape_to_noescape cannot change function ABI",
-        *ICI->getFunction());
+        "convert_escape_to_noescape cannot change function ABI");
 
     // After mandatory passes convert_escape_to_noescape should not have the
     // '[not_guaranteed]' or '[escaped]' attributes.
@@ -7030,6 +7026,33 @@ void SILProperty::verify(const SILModule &M) const {
   }
 }
 
+static void requireABICompatibleVTableEntry(const SILVTableEntry &entry,
+                                 const Lowering::SILConstantInfo &baseInfo) {
+  auto &F = *entry.getImplementation();
+
+  auto baseTy = baseInfo.getSILType().castTo<SILFunctionType>();
+  auto implTy = F.getLoweredFunctionType();
+
+  // TODO: can we migrate this to checkFunctionForABIDifference?
+
+  auto result = baseTy->isABICompatibleWith(implTy, F);
+  if (result.isCompatible())
+    return;
+
+  beginVerificationFailure(F);
+
+  auto &out = llvm::dbgs();
+  out << "vtable entry for ";
+  entry.getMethod().print(out);
+  out << " must be ABI-compatible: " << result.getMessage() << "\n";
+  if (result.hasPayload())
+    out << "  parameter: " << result.getPayload() << "\n";
+  out << "  base type: " << baseTy << "\n"
+         "  implementation type: " << implTy << "\n";
+
+  endVerificationFailure(F);
+}
+
 /// Verify that a vtable follows invariants.
 void SILVTable::verify(const SILModule &M) const {
   if (!verificationEnabled(M))
@@ -7081,22 +7104,9 @@ void SILVTable::verify(const SILModule &M) const {
     assert(!entry.getMethod().isForeign && "vtable entry must not be foreign");
 
     // The vtable entry must be ABI-compatible with the overridden vtable slot.
-    SmallString<32> baseName;
-    {
-      llvm::raw_svector_ostream os(baseName);
-      entry.getMethod().print(os);
-    }
-
     if (M.getStage() != SILStage::Lowered &&
         !M.getASTContext().LangOpts.hasFeature(Feature::Embedded)) {
-      SILVerifier(*entry.getImplementation(), /*calleeCache=*/nullptr,
-                                              /*SingleFunction=*/true,
-                                              /*checkLinearLifetime=*/ false)
-          .requireABICompatibleFunctionTypes(
-              baseInfo.getSILType().castTo<SILFunctionType>(),
-              entry.getImplementation()->getLoweredFunctionType(),
-              "vtable entry for " + baseName + " must be ABI-compatible",
-              *entry.getImplementation());
+      requireABICompatibleVTableEntry(entry, baseInfo);
     }
     
     // Validate the entry against its superclass vtable.

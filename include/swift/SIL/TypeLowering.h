@@ -1181,7 +1181,7 @@ public:
     // Non-trivial difference requires thunk.
     NeedsThunk
   };
-  
+
   /// Test if type1 is ABI compatible with type2, and can be converted
   /// with a trivial bitcast.
   ///
@@ -1200,6 +1200,13 @@ public:
                                                SILFunctionType *fnTy1,
                                                SILFunctionType *fnTy2);
 
+  bool canConvertWithConvertFunction(SILModule &M,
+                                     SILFunctionType *fnTy1,
+                                     SILFunctionType *fnTy2) {
+    auto diff = checkFunctionForABIDifferences(M, fnTy1, fnTy2);
+    return diff == ABIDifference::CompatibleRepresentation ||
+           diff == ABIDifference::CompatibleCallingConvention;
+  }
 
   /// Lower the function type as a possible substitution for the type of
   /// \p constant. The result is not cached as part of the constant's normal
