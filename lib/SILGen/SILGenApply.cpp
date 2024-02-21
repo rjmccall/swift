@@ -1278,8 +1278,6 @@ public:
   void visitAbstractClosureExpr(AbstractClosureExpr *e) {
     SILDeclRef constant(e);
 
-    SGF.SGM.Types.setCaptureTypeExpansionContext(constant, SGF.SGM.M);
-    // Emit the closure body.
     SGF.SGM.emitClosure(e);
 
     // If we're in top-level code, we don't need to physically capture script

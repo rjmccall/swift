@@ -3863,6 +3863,14 @@ static CanAnyFunctionType getEntryPointInterfaceType(ASTContext &C) {
                                  llvm::makeArrayRef(params), Int32Ty, extInfo);
 }
 
+CanAnyFunctionType
+TypeConverter::makeConstantInterfaceType(SILDeclRef c,
+                                         const ClosureTypeInfo &closureInfo) {
+  auto fnType = cast<AnyFunctionType>(
+      closureInfo.substType->mapTypeOutOfContext()->getCanonicalType());
+  return getFunctionInterfaceTypeWithCaptures(*this, fnType, c);
+}
+
 CanAnyFunctionType TypeConverter::makeConstantInterfaceType(SILDeclRef c) {
   if (auto *derivativeId = c.getDerivativeFunctionIdentifier()) {
     auto originalFnTy =
@@ -3877,15 +3885,11 @@ CanAnyFunctionType TypeConverter::makeConstantInterfaceType(SILDeclRef c) {
   auto *vd = c.loc.dyn_cast<ValueDecl *>();
   switch (c.kind) {
   case SILDeclRef::Kind::Func: {
-    CanAnyFunctionType funcTy;
     if (auto *ACE = c.loc.dyn_cast<AbstractClosureExpr *>()) {
-      // FIXME: Closures could have an interface type computed by Sema.
-      funcTy = cast<AnyFunctionType>(
-        ACE->getType()->mapTypeOutOfContext()->getCanonicalType());
-    } else {
-      funcTy = cast<AnyFunctionType>(
-        vd->getInterfaceType()->getCanonicalType());
+      return makeConstantInterfaceType(c, getClosureTypeInfo(ACE));
     }
+    CanAnyFunctionType funcTy = cast<AnyFunctionType>(
+        vd->getInterfaceType()->getCanonicalType());
     return getFunctionInterfaceTypeWithCaptures(*this, funcTy, c);
   }
 
@@ -4784,15 +4788,40 @@ CanSILBoxType TypeConverter::getBoxTypeForEnumElement(
   return boxTy;
 }
 
-llvm::Optional<AbstractionPattern>
-TypeConverter::getConstantAbstractionPattern(SILDeclRef constant) {
+const ClosureTypeInfo *TypeConverter::getClosureTypeInfo(SILDeclRef constant) {
   if (auto closure = constant.getAbstractClosureExpr()) {
-    // Using operator[] here creates an entry in the map if one doesn't exist
-    // yet, marking the fact that the lack of abstraction pattern has been
-    // established and cannot be overridden by `setAbstractionPattern` later.
-    return ClosureAbstractionPatterns[closure];
+    return &getClosureTypeInfo(closure);
   }
-  return llvm::None;
+  return nullptr;
+}
+
+const ClosureTypeInfo &
+TypeConverter::getClosureTypeInfo(AbstractClosureExpr *closure) {
+  auto it = ClosureInfos.find(closure);
+  assert(it != ClosureInfos.end() &&
+         "looking for closure info for closure without any set");
+  return it->second;
+}
+
+void TypeConverter::withClosureTypeInfo(AbstractClosureExpr *closure,
+                                        const ClosureTypeInfo &info,
+                                        llvm::function_ref<void()> operation) {
+  auto insertResult = ClosureInfos.insert({closure, info});
+  (void) insertResult;
+#ifndef NDEBUG
+  if (!insertResult.second) {
+    auto &existing = insertResult.first->second;
+    assert(existing.substType == info.substType);
+    assert(existing.expectedType == info.expectedType);
+  }
+#endif
+
+  operation();
+
+  // TODO: figure out a way to clear this out so that emitting a closure
+  // doesn't require permanent memory use.  Right now we have too much
+  // code relying on not emitting this in a scoped pattern.
+  //ClosureInfos.erase(closure);
 }
 
 TypeExpansionContext
@@ -4806,17 +4835,6 @@ TypeConverter::getCaptureTypeExpansionContext(SILDeclRef constant) {
   auto minimal = TypeExpansionContext::minimal();
   CaptureTypeExpansionContexts.insert({constant, minimal});
   return minimal;
-}
-
-void TypeConverter::setAbstractionPattern(AbstractClosureExpr *closure,
-                                          AbstractionPattern pattern) {
-  auto existing = ClosureAbstractionPatterns.find(closure);
-  if (existing != ClosureAbstractionPatterns.end()) {
-    assert(*existing->second == pattern
-     && "closure shouldn't be emitted at different abstraction level contexts");
-  } else {
-    ClosureAbstractionPatterns[closure] = pattern;
-  }
 }
 
 void TypeConverter::setCaptureTypeExpansionContext(SILDeclRef constant,

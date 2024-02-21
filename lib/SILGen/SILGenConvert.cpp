@@ -1269,14 +1269,6 @@ ConvertingInitialization::emitWithAdjustedConversion(SILGenFunction &SGF,
   return ManagedValue::forInContext();
 }
 
-llvm::Optional<AbstractionPattern>
-ConvertingInitialization::getAbstractionPattern() const {
-  if (TheConversion.isReabstraction()) {
-    return TheConversion.getReabstractionOrigType();
-  }
-  return llvm::None;
-}
-
 ManagedValue Conversion::emit(SILGenFunction &SGF, SILLocation loc,
                               ManagedValue value, SGFContext C) const {
   switch (getKind()) {

@@ -484,6 +484,10 @@ namespace {
     }
     RValue visitFunctionConversionExpr(FunctionConversionExpr *E,
                                        SGFContext C);
+    ManagedValue emitCFunctionPointer(FunctionConversionExpr *conversionExpr);
+    ManagedValue emitConvertedClosure(AbstractClosureExpr *E, Type convertedType,
+                                      SGFContext C);
+
     RValue visitActorIsolationErasureExpr(ActorIsolationErasureExpr *E,
                                           SGFContext C);
     RValue visitCovariantFunctionConversionExpr(
@@ -515,7 +519,13 @@ namespace {
     RValue visitDestructureTupleExpr(DestructureTupleExpr *E, SGFContext C);
     RValue visitDynamicTypeExpr(DynamicTypeExpr *E, SGFContext C);
     RValue visitCaptureListExpr(CaptureListExpr *E, SGFContext C);
+    ManagedValue emitCaptureListExpr(CaptureListExpr *E,
+        llvm::function_ref<ManagedValue(AbstractClosureExpr *closure)> operation);
     RValue visitAbstractClosureExpr(AbstractClosureExpr *E, SGFContext C);
+    ManagedValue emitAbstractClosureExpr(AbstractClosureExpr *E,
+                                         AbstractionPattern origType,
+                                         CanAnyFunctionType substType,
+                                         CanSILFunctionType expectedTy);
     RValue visitInterpolatedStringLiteralExpr(InterpolatedStringLiteralExpr *E,
                                               SGFContext C);
     RValue visitRegexLiteralExpr(RegexLiteralExpr *E, SGFContext C);
@@ -584,6 +594,11 @@ namespace {
     RValue visitCopyExpr(CopyExpr *E, SGFContext C);
     RValue visitMacroExpansionExpr(MacroExpansionExpr *E, SGFContext C);
     RValue visitCurrentContextIsolationExpr(CurrentContextIsolationExpr *E, SGFContext C);
+
+    static bool isPeepholeableClosureExpr(Expr *e);
+    static bool isPeepholeableClosureExpr(AbstractClosureExpr *e);
+    ManagedValue emitPeepholeableClosureExpr(Expr *e,
+      llvm::function_ref<ManagedValue(AbstractClosureExpr *closure)> emitClosure);
   };
 } // end anonymous namespace
 
@@ -1726,9 +1741,9 @@ static ManagedValue convertCFunctionSignature(SILGenFunction &SGF,
   return result;
 }
 
-static
-ManagedValue emitCFunctionPointer(SILGenFunction &SGF,
-                                  FunctionConversionExpr *conversionExpr) {
+
+ManagedValue
+RValueEmitter::emitCFunctionPointer(FunctionConversionExpr *conversionExpr) {
   auto expr = conversionExpr->getSubExpr();
   
   // Look through base-ignored exprs to get to the function ref.
@@ -1754,23 +1769,15 @@ ManagedValue emitCFunctionPointer(SILGenFunction &SGF,
     setLocFromConcreteDeclRef(declRef->getDeclRef());
   } else if (auto memberRef = dyn_cast<MemberRefExpr>(semanticExpr)) {
     setLocFromConcreteDeclRef(memberRef->getMember());
-  } else if (auto closure = dyn_cast<AbstractClosureExpr>(semanticExpr)) {
-    // Emit the closure body.
-    SGF.SGM.emitClosure(closure);
+  } else if (isPeepholeableClosureExpr(semanticExpr)) {
+    (void) emitPeepholeableClosureExpr(semanticExpr,
+                                       [&](AbstractClosureExpr *closure) {
+      // Emit the closure body.
+      SGF.SGM.emitClosure(closure);
 
-    loc = closure;
-  } else if (auto captureList = dyn_cast<CaptureListExpr>(semanticExpr)) {
-    // Ensure that weak captures are in a separate scope.
-    DebugScope scope(SGF, CleanupLocation(captureList));
-    // CaptureListExprs evaluate their bound variables.
-    for (auto capture : captureList->getCaptureList())
-      SGF.visit(capture.PBD);
-
-    // Emit the closure body.
-    auto *closure = captureList->getClosureBody();
-    SGF.SGM.emitClosure(closure);
-
-    loc = closure;
+      loc = closure;
+      return ManagedValue();
+    });
   } else {
     llvm_unreachable("c function pointer converted from a non-concrete decl ref");
   }
@@ -1903,61 +1910,6 @@ static ManagedValue convertFunctionRepresentation(SILGenFunction &SGF,
   llvm_unreachable("bad representation");
 }
 
-/// Whether the given abstraction pattern as an opaque thrown error.
-static bool hasOpaqueThrownError(const AbstractionPattern &pattern) {
-  if (auto thrownPattern = pattern.getFunctionThrownErrorType())
-    return thrownPattern->isTypeParameterOrOpaqueArchetype();
-
-  return false;
-}
-
-// Ideally our prolog/epilog emission would be able to handle all possible
-// reabstractions and conversions. Until then, this returns true if a closure
-// literal of type `literalType` can be directly emitted by SILGen as
-// `convertedType`.
-static bool canPeepholeLiteralClosureConversion(
-    Type literalType, Type convertedType,
-    const std::optional<AbstractionPattern> &closurePattern) {
-  auto literalFnType = literalType->getAs<FunctionType>();
-  auto convertedFnType = convertedType->getAs<FunctionType>();
-  
-  if (!literalFnType || !convertedFnType)
-    return false;
-    
-  // Is it an identity conversion?
-  if (literalFnType->isEqual(convertedFnType)) {
-    return true;
-  }
-
-  // Are the types equivalent aside from effects (throws) or coeffects
-  // (escaping)? Then we should emit the literal as having the destination type
-  // (co)effects, even if it doesn't exercise them.
-  //
-  // TODO: We could also in principle let `async` through here, but that
-  // interferes with the implementation of `reasync`.
-  auto literalWithoutEffects = literalFnType->getExtInfo().intoBuilder()
-    .withNoEscape(false)
-    .build();
-    
-  auto convertedWithoutEffects = convertedFnType->getExtInfo().intoBuilder()
-    .withNoEscape(false)
-    .build();
-
-  // If the closure pattern has an abstract thrown error, we are unable to
-  // emit the literal with a difference in the thrown error type.
-  if (!(closurePattern && hasOpaqueThrownError(*closurePattern))) {
-    literalWithoutEffects = literalWithoutEffects.withThrows(false, Type());
-    convertedWithoutEffects = convertedWithoutEffects.withThrows(false, Type());
-  }
-
-  if (literalFnType->withExtInfo(literalWithoutEffects)
-        ->isEqual(convertedFnType->withExtInfo(convertedWithoutEffects))) {
-    return true;
-  }
-
-  return false;
-}
-
 RValue RValueEmitter::visitFunctionConversionExpr(FunctionConversionExpr *e,
                                                   SGFContext C)
 {
@@ -1974,7 +1926,7 @@ RValue RValueEmitter::visitFunctionConversionExpr(FunctionConversionExpr *e,
         FunctionTypeRepresentation::CFunctionPointer) {
       // A "conversion" of a DeclRef a C function pointer is done by referencing
       // the thunk (or original C function) with the C calling convention.
-      result = emitCFunctionPointer(SGF, e);
+      result = emitCFunctionPointer(e);
     } else {
       // Ok, we're converting a C function pointer value to another C function
       // pointer.
@@ -2013,29 +1965,12 @@ RValue RValueEmitter::visitFunctionConversionExpr(FunctionConversionExpr *e,
     subExpr = subCoerce->getSubExpr()->getSemanticsProvidingExpr();
   }
   
-  if ((isa<AbstractClosureExpr>(subExpr) || isa<CaptureListExpr>(subExpr))
-      && canPeepholeLiteralClosureConversion(subExpr->getType(),
-                                             e->getType(),
-                                             C.getAbstractionPattern())) {
-    // If we're emitting into a context with a preferred abstraction pattern
-    // already, carry that along.
-    auto origType = C.getAbstractionPattern();
-    // If not, use the conversion type as the desired abstraction pattern.
-    if (!origType) {
-      origType = AbstractionPattern(e->getType()->getCanonicalType());
-    }
-    
-    auto substType = subExpr->getType()->getCanonicalType();
-    
-    auto conversion = Conversion::getSubstToOrig(*origType, substType,
-                                      SGF.getLoweredType(*origType, substType));
-    ConvertingInitialization convertingInit(conversion, SGFContext());
-    auto closure = SGF.emitRValue(subExpr,
-                                  SGFContext(&convertingInit))
-      .getAsSingleValue(SGF, e);
-    closure = SGF.emitSubstToOrigValue(e, closure, *origType, substType);
-
-    return RValue(SGF, e, closure);
+  // Handle a conversion of a closure specially.
+  if (isPeepholeableClosureExpr(subExpr)) {
+    return RValue(SGF, e,
+      emitPeepholeableClosureExpr(subExpr, [&](AbstractClosureExpr *CE) {
+        return emitConvertedClosure(CE, e->getType(), C);
+      }));
   }
   
   // Handle a reference to a "thin" native Swift function that only changes
@@ -2831,19 +2766,6 @@ RValue RValueEmitter::visitDynamicTypeExpr(DynamicTypeExpr *E, SGFContext C) {
                 ManagedValue::forObjectRValueWithoutOwnership(metatype));
 }
 
-RValue RValueEmitter::visitCaptureListExpr(CaptureListExpr *E, SGFContext C) {
-  // Ensure that weak captures are in a separate scope.
-  DebugScope scope(SGF, CleanupLocation(E));
-  // CaptureListExprs evaluate their bound variables, but they don't introduce
-  // new ones that should be described in the debug info.
-  bool generateDebugInfo = false;
-  for (auto capture : E->getCaptureList())
-    SGF.visitPatternBindingDecl(capture.PBD, generateDebugInfo);
-
-  // Then they evaluate to their body.
-  return visit(E->getClosureBody(), C);
-}
-
 /// Returns the wrapped value placeholder that is meant to be substituted
 /// in for the given autoclosure. This autoclosure placeholder is created
 /// when \c init(wrappedValue:) takes an autoclosure for the \c wrappedValue
@@ -2858,35 +2780,122 @@ wrappedValueAutoclosurePlaceholder(const AbstractClosureExpr *e) {
   return nullptr;
 }
 
+/// Does the given expression work like a normal closure expression, which
+/// turns into a (possibly partially-applied) reference to a specific
+/// function?
+bool RValueEmitter::isPeepholeableClosureExpr(Expr *e) {
+  if (auto closure = dyn_cast<AbstractClosureExpr>(e)) {
+    return isPeepholeableClosureExpr(closure);
+  } else if (auto captures = dyn_cast<CaptureListExpr>(e)) {
+    return isPeepholeableClosureExpr(captures->getClosureBody());
+  } else {
+    return false;
+  }
+}
+
+bool RValueEmitter::isPeepholeableClosureExpr(AbstractClosureExpr *e) {
+  // The way we handle autoclosures around property wrapper placeholders
+  // makes them not act like closure expressions in any meaningful
+  // way.
+  return wrappedValueAutoclosurePlaceholder(e) == nullptr;
+}
+
+ManagedValue RValueEmitter::emitPeepholeableClosureExpr(Expr *e,
+  llvm::function_ref<ManagedValue(AbstractClosureExpr *closure)> emit) {
+  if (auto closure = dyn_cast<AbstractClosureExpr>(e)) {
+    return emit(closure);
+  } else if (auto captures = dyn_cast<CaptureListExpr>(e)) {
+    return emitCaptureListExpr(captures, emit);
+  } else {
+    llvm_unreachable("not a closure expression!");
+  }
+}
+
+RValue RValueEmitter::visitCaptureListExpr(CaptureListExpr *E, SGFContext C) {
+  return RValue(SGF, E, emitCaptureListExpr(E, [&](AbstractClosureExpr *body) {
+    return visitAbstractClosureExpr(body, C).getScalarValue();
+  }));
+}
+
+ManagedValue RValueEmitter::emitCaptureListExpr(CaptureListExpr *E,
+    llvm::function_ref<ManagedValue(AbstractClosureExpr*)> emitBody) {
+  // Ensure that weak captures are in a separate scope.
+  DebugScope scope(SGF, CleanupLocation(E));
+
+  // CaptureListExprs evaluate their bound variables, but they don't introduce
+  // new ones that should be described in the debug info.
+  bool generateDebugInfo = false;
+  for (auto capture : E->getCaptureList())
+    SGF.visitPatternBindingDecl(capture.PBD, generateDebugInfo);
+
+  // Then they evaluate to their "body" (the underlying closure).
+  return emitBody(E->getClosureBody());
+}
+
 RValue RValueEmitter::visitAbstractClosureExpr(AbstractClosureExpr *e,
                                                SGFContext C) {
-  if (auto *placeholder = wrappedValueAutoclosurePlaceholder(e))
+  // Look through autoclosures that are just calls to a placeholder
+  // expression.  This is probably a generalizable operation.
+  if (auto *placeholder = wrappedValueAutoclosurePlaceholder(e)) {
     return visitPropertyWrapperValuePlaceholderExpr(placeholder, C);
-
-  // If the context prefers a particular abstraction pattern, lower the
-  // closure against that abstraction pattern. This should be the only use
-  // of the closure.
-  if (auto contextOrigType = C.getAbstractionPattern()) {
-    SGF.SGM.Types.setAbstractionPattern(e, *contextOrigType);
   }
-  SGF.SGM.Types.setCaptureTypeExpansionContext(SILDeclRef(e), SGF.SGM.M);
-  
-  // Emit the closure body.
-  SGF.SGM.emitClosure(e);
+
+  auto substType = cast<AnyFunctionType>(e->getType()->getCanonicalType());
+  AbstractionPattern origType(substType);
+  auto expectedTy = cast<SILFunctionType>(SGF.getLoweredRValueType(substType));
+  auto result = emitAbstractClosureExpr(e, origType, substType, expectedTy);
+  return RValue(SGF, e, substType, result);
+}
+
+ManagedValue RValueEmitter::emitAbstractClosureExpr(AbstractClosureExpr *e,
+                                                    AbstractionPattern origType,
+                                                    CanAnyFunctionType substType,
+                                                    CanSILFunctionType expectedTy) {
+  assert(wrappedValueAutoclosurePlaceholder(e) == nullptr &&
+         "should've ruled out this path before here");
+
+  SGF.SGM.emitClosure(e, origType, substType, expectedTy);
+
+  // Generate a reference to the closure we just emitted.
 
   SubstitutionMap subs;
   if (e->getCaptureInfo().hasGenericParamCaptures())
     subs = SGF.getForwardingSubstitutionMap();
 
-  // Generate the closure value (if any) for the closure expr's function
-  // reference.
-  auto refType = e->getType()->getCanonicalType();
   SILLocation L = e;
   L.markAutoGenerated();
-  ManagedValue result = SGF.emitClosureValue(L, SILDeclRef(e),
-                   refType, subs,
-                   /*already converted*/ C.getAbstractionPattern().has_value());
-  return RValue(SGF, e, refType, result);
+  return SGF.emitClosureValue(L, SILDeclRef(e), substType, subs,
+                              /*already converted*/ true);
+}
+
+ManagedValue
+RValueEmitter::emitConvertedClosure(AbstractClosureExpr *e,
+                                    Type destType, SGFContext C) {
+
+  // Check to see if we're emitting into a further level of conversion.
+  auto init = C.getEmitInto();
+  if (auto convertingInit = (init ? init->getAsConversion() : nullptr)) {
+    auto conv = convertingInit->getConversion();
+
+    // For now, only peephole reabstraction conversions.
+    if (conv.isReabstraction()) {      
+      assert(conv.getReabstractionSubstType() == destType->getCanonicalType());
+      auto origType = conv.getReabstractionOrigType();
+      auto substType = cast<AnyFunctionType>(conv.getReabstractionSubstType());
+      auto expectedTy =
+        conv.getReabstractionLoweredResultType().castTo<SILFunctionType>();
+      auto closure = emitAbstractClosureExpr(e, origType, substType, expectedTy);
+      convertingInit->setConvertedValue(closure);
+      return ManagedValue::forInContext();
+    }
+  }
+
+  auto substType = cast<AnyFunctionType>(destType->getCanonicalType());
+  AbstractionPattern origType(substType);
+  auto expectedTy =
+    cast<SILFunctionType>(SGF.getLoweredRValueType(origType, substType));
+  auto closure = emitAbstractClosureExpr(e, origType, substType, expectedTy);
+  return closure;
 }
 
 RValue RValueEmitter::

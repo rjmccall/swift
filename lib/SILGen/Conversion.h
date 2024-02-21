@@ -349,7 +349,7 @@ public:
   }
   
   // Get the abstraction pattern, if any, the value is converted to.
-  llvm::Optional<AbstractionPattern> getAbstractionPattern() const override;
+  llvm::Optional<AbstractionPattern> getAbstractionPattern() const;
 
   // Bookkeeping.
   void finishInitialization(SILGenFunction &SGF) override {

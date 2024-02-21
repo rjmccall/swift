@@ -1031,17 +1031,18 @@ SILGenFunction::emitClosureValue(SILLocation loc, SILDeclRef constant,
                          calleeConvention);
   auto result = emitManagedRValueWithCleanup(toClosure);
 
-  // Get the lowered AST types:
-  //  - the original type
-  auto origFormalType = AbstractionPattern(subs, constantInfo.LoweredType);
-
-  // - the substituted type
-  auto substFormalType = expectedType;
-
   // Generalize if necessary.
-  if (!alreadyConverted)
+  if (!alreadyConverted) {
+    // Get the lowered AST types:
+    //  - the original type
+    auto origFormalType = AbstractionPattern(subs, constantInfo.LoweredType);
+
+    // - the substituted type
+    auto substFormalType = expectedType;
+
     result = emitOrigToSubstValue(loc, result, origFormalType,
                                   substFormalType);
+  }
 
   return result;
 }
@@ -1080,7 +1081,10 @@ void SILGenFunction::emitFunction(FuncDecl *fd) {
 
 void SILGenFunction::emitClosure(AbstractClosureExpr *ace) {
   MagicFunctionName = SILGenModule::getMagicFunctionName(ace);
-  OrigFnType = SGM.M.Types.getConstantAbstractionPattern(SILDeclRef(ace));
+
+  auto closureInfo = SGM.M.Types.getClosureTypeInfo(ace);
+
+  OrigFnType = closureInfo.origType;
 
   auto resultIfaceTy = ace->getResultType()->mapTypeOutOfContext();
   llvm::Optional<Type> errorIfaceTy;

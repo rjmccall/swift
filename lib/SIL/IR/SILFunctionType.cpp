@@ -3943,9 +3943,74 @@ static bool isImporterGeneratedAccessor(const clang::Decl *clangDecl,
   return true;
 }
 
+static CanSILFunctionType getUncachedSILFunctionTypeForClosure(
+    TypeConverter &TC, SILDeclRef constant,
+    CanAnyFunctionType origLoweredInterfaceType,
+    const ClosureTypeInfo &closureInfo) {
+  assert(TC.getDeclRefRepresentation(constant) ==
+         SILFunctionTypeRepresentation::Thin);
+
+  auto genericSig = origLoweredInterfaceType.getOptGenericSignature();
+
+  // We assemble the closure function type mostly from the expected type.
+  CanSILFunctionType expectedTy = closureInfo.expectedType;
+
+  // Override the representation; global functions are always thin.
+  auto extInfoBuilder = expectedTy->getExtInfo().intoBuilder()
+      .withRepresentation(SILFunctionTypeRepresentation::Thin);
+
+  // Most of the structure is taken directly from the expected type.
+  SmallVector<SILParameterInfo> params;
+  for (auto param : expectedTy->getParameters()) {
+    params.push_back(param.mapTypeOutOfContext());
+  }
+
+  SmallVector<SILResultInfo> results;
+  for (auto result : expectedTy->getResults()) {
+    results.push_back(result.mapTypeOutOfContext());
+  }
+
+  SmallVector<SILYieldInfo> yields;
+  for (auto yield : expectedTy->getYields()) {
+    yields.push_back(yield.mapTypeOutOfContext());
+  }
+
+  std::optional<SILResultInfo> errorResult;
+  if (expectedTy->hasErrorResult()) {
+    errorResult = expectedTy->getErrorResult().mapTypeOutOfContext();
+  }
+
+  // Closure functions can never be @isolated(any); we have to erase to
+  // that by partial application.  Remove the attribute and add the capture
+  // parameter.  This must always be the first capture.
+  if (extInfoBuilder.hasErasedIsolation()) {
+    extInfoBuilder = extInfoBuilder.withErasedIsolation(false);
+    auto paramTy = SILType::getOpaqueIsolationType(TC.Context);
+    params.push_back({paramTy.getASTType(),
+                      ParameterConvention::Direct_Guaranteed});
+  }
+
+  // Add the rest of the captures.
+  lowerCaptureContextParameters(TC, constant, genericSig,
+                                TC.getCaptureTypeExpansionContext(constant),
+                                params);
+
+  // Always thin.
+  auto calleeConvention = ParameterConvention::Direct_Unowned;
+
+  return SILFunctionType::get(genericSig, extInfoBuilder.build(),
+                              expectedTy->getCoroutineKind(),
+                              calleeConvention,
+                              params, yields, results, errorResult,
+                              SubstitutionMap(), SubstitutionMap(),
+                              TC.Context);
+}
+
 static CanSILFunctionType getUncachedSILFunctionTypeForConstant(
     TypeConverter &TC, TypeExpansionContext context, SILDeclRef constant,
     TypeConverter::LoweredFormalTypes bridgedTypes) {
+  assert(!constant.getAbstractClosureExpr());
+
   auto silRep = TC.getDeclRefRepresentation(constant);
   assert(silRep != SILFunctionTypeRepresentation::Thick &&
          silRep != SILFunctionTypeRepresentation::Block);
@@ -3982,15 +4047,8 @@ static CanSILFunctionType getUncachedSILFunctionTypeForConstant(
       auto proto = constant.getDecl()->getDeclContext()->getSelfProtocolDecl();
       witnessMethodConformance = ProtocolConformanceRef(proto);
     }
-    
-    // Does this constant have a preferred abstraction pattern set?
-    AbstractionPattern origType = [&]{
-      if (auto abstraction = TC.getConstantAbstractionPattern(constant)) {
-        return *abstraction;
-      } else {
-        return AbstractionPattern(origLoweredInterfaceType);
-      }
-    }();
+
+    AbstractionPattern origType(origLoweredInterfaceType);
 
     return ::getNativeSILFunctionType(
         TC, context, origType, origLoweredInterfaceType, extInfoBuilder,
@@ -4038,6 +4096,9 @@ static CanSILFunctionType getUncachedSILFunctionTypeForConstant(
 CanSILFunctionType TypeConverter::getUncachedSILFunctionTypeForConstant(
     TypeExpansionContext context, SILDeclRef constant,
     CanAnyFunctionType origInterfaceType) {
+  // This entrypoint is only used for computing a type for dynamic dispatch.
+  assert(!constant.getAbstractClosureExpr());
+
   auto bridgedTypes = getLoweredFormalTypes(constant, origInterfaceType);
   return ::getUncachedSILFunctionTypeForConstant(*this, context, constant,
                                                  bridgedTypes);
@@ -4170,7 +4231,6 @@ getLoweredResultIndices(const SILFunctionType *functionType,
                           numResults, resultIndices);
 }
 
-
 const SILConstantInfo &
 TypeConverter::getConstantInfo(TypeExpansionContext expansion,
                                SILDeclRef constant) {
@@ -4180,19 +4240,33 @@ TypeConverter::getConstantInfo(TypeExpansionContext expansion,
       return *found->second;
   }
 
-  // First, get a function type for the constant.  This creates the
-  // right type for a getter or setter.
-  auto formalInterfaceType = makeConstantInterfaceType(constant);
+  CanAnyFunctionType formalInterfaceType;
+  CanAnyFunctionType loweredInterfaceType;
+  std::optional<AbstractionPattern> origType;
+  CanSILFunctionType silFnType;
 
-  // The lowered type is the formal type, but uncurried and with
-  // parameters automatically turned into their bridged equivalents.
-  auto bridgedTypes = getLoweredFormalTypes(constant, formalInterfaceType);
+  if (auto closureInfo = getClosureTypeInfo(constant)) {
+    formalInterfaceType = makeConstantInterfaceType(constant, *closureInfo);
+    origType = closureInfo->origType;
+    loweredInterfaceType = formalInterfaceType;
+    silFnType = getUncachedSILFunctionTypeForClosure(*this, constant,
+                                                     formalInterfaceType,
+                                                     *closureInfo);
 
-  CanAnyFunctionType loweredInterfaceType = bridgedTypes.Uncurried;
+  } else {
+    // First, get a function type for the constant.  This creates the
+    // right type for a getter or setter.
+    formalInterfaceType = makeConstantInterfaceType(constant);
 
-  // The SIL type encodes conventions according to the original type.
-  CanSILFunctionType silFnType = ::getUncachedSILFunctionTypeForConstant(
+    // The lowered type is the formal type, but uncurried and with
+    // parameters automatically turned into their bridged equivalents.
+    auto bridgedTypes = getLoweredFormalTypes(constant, formalInterfaceType);
+
+    origType = bridgedTypes.Pattern;
+    loweredInterfaceType = bridgedTypes.Uncurried;
+    silFnType = ::getUncachedSILFunctionTypeForConstant(
       *this, expansion, constant, bridgedTypes);
+  }
 
   // If the constant refers to a derivative function, get the SIL type of the
   // original function and use it to compute the derivative SIL type.
@@ -4253,7 +4327,7 @@ TypeConverter::getConstantInfo(TypeExpansionContext expansion,
                                     alignof(SILConstantInfo));
 
   auto result = ::new (resultBuf) SILConstantInfo{formalInterfaceType,
-                                                  bridgedTypes.Pattern,
+                                                  *origType,
                                                   loweredInterfaceType,
                                                   silFnType};
   if (DisableConstantInfoCache)

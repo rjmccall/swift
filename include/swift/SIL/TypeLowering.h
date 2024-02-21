@@ -695,6 +695,14 @@ enum class CaptureKind {
   Immutable
 };
 
+/// Interesting information about the type context that we want to emit
+/// a closure in.
+struct ClosureTypeInfo {
+  AbstractionPattern origType;
+  CanAnyFunctionType substType;
+  CanSILFunctionType expectedType;
+};
+
 /// TypeConverter - helper class for creating and managing TypeLowerings.
 class TypeConverter {
   friend class TypeLowering;
@@ -825,12 +833,13 @@ class TypeConverter {
   /// Second element is a ResilienceExpansion.
   llvm::DenseMap<std::pair<SILType, unsigned>, unsigned> TypeFields;
 
-  llvm::DenseMap<AbstractClosureExpr *, llvm::Optional<AbstractionPattern>>
-      ClosureAbstractionPatterns;
+  llvm::DenseMap<AbstractClosureExpr *, ClosureTypeInfo> ClosureInfos;
   llvm::DenseMap<SILDeclRef, TypeExpansionContext>
     CaptureTypeExpansionContexts;
 
   CanAnyFunctionType makeConstantInterfaceType(SILDeclRef constant);
+  CanAnyFunctionType makeConstantInterfaceType(SILDeclRef constant,
+                                         const ClosureTypeInfo &closureInfo);
   
   // Types converted during foreign bridging.
 #define BRIDGING_KNOWN_TYPE(BridgedModule, BridgedType)                        \
@@ -1226,26 +1235,16 @@ public:
                                          SILType enumType,
                                          EnumElementDecl *elt);
 
-  /// Get the preferred abstraction pattern, if any, by which to lower a
-  /// declaration.
-  ///
-  /// This can be set using \c setAbstractionPattern , but only before
-  /// the abstraction pattern is queried using this function. Once the
-  /// abstraction pattern has been asked for, it may not be changed.
-  llvm::Optional<AbstractionPattern>
-  getConstantAbstractionPattern(SILDeclRef constant);
   TypeExpansionContext getCaptureTypeExpansionContext(SILDeclRef constant);
-  
-  /// Set the preferred abstraction pattern for a closure.
-  ///
-  /// The abstraction pattern can only be set before any calls to
-  /// \c getConstantAbstractionPattern on the same closure. It may not be
-  /// changed once it has been read.
-  void setAbstractionPattern(AbstractClosureExpr *closure,
-                             AbstractionPattern pattern);
-  
   void setCaptureTypeExpansionContext(SILDeclRef constant,
                                       SILModule &M);
+
+  const ClosureTypeInfo *getClosureTypeInfo(SILDeclRef constant);
+  const ClosureTypeInfo &getClosureTypeInfo(AbstractClosureExpr *closure);
+
+  void withClosureTypeInfo(AbstractClosureExpr *closure,
+                           const ClosureTypeInfo &closureInfo,
+                           llvm::function_ref<void()> operation);
 
   void setLoweredAddresses();
 
