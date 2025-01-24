@@ -19,6 +19,7 @@
 #include "swift/AST/ProtocolConformance.h"
 #include "swift/AST/RequirementSignature.h"
 #include "swift/AST/Types.h"
+#include "swift/IRGen/LinkContext.h"
 #include "swift/IRGen/ValueWitness.h"
 #include "swift/SIL/SILFunction.h"
 #include "swift/SIL/SILGlobalVariable.h"
@@ -41,43 +42,6 @@ class Alignment;
 
 /// Determine if the triple uses the DLL storage.
 bool useDllStorage(const llvm::Triple &triple);
-
-class UniversalLinkageInfo {
-public:
-  bool IsELFObject;
-  bool IsMSVCEnvironment;
-  bool UseDLLStorage;
-  bool Internalize;
-
-  /// True iff are multiple llvm modules.
-  bool HasMultipleIGMs;
-
-  /// When this is true, the linkage for forward-declared private symbols will
-  /// be promoted to public external. Used by the LLDB expression evaluator.
-  bool ForcePublicDecls;
-
-  explicit UniversalLinkageInfo(IRGenModule &IGM);
-
-  UniversalLinkageInfo(const llvm::Triple &triple, bool hasMultipleIGMs,
-                       bool forcePublicDecls, bool isStaticLibrary);
-
-  /// In case of multiple llvm modules (in multi-threaded compilation) all
-  /// private decls must be visible from other files.
-  bool shouldAllPrivateDeclsBeVisibleFromOtherFiles() const {
-    return HasMultipleIGMs;
-  }
-  /// In case of multiple llvm modules, private lazy protocol
-  /// witness table accessors could be emitted by two different IGMs during
-  /// IRGen into different object files and the linker would complain about
-  /// duplicate symbols.
-  bool needLinkerToMergeDuplicateSymbols() const { return HasMultipleIGMs; }
-
-  /// This is used by the LLDB expression evaluator since an expression's
-  /// llvm::Module may need to access private symbols defined in the
-  /// expression's context. This flag ensures that private accessors are
-  /// forward-declared as public external in the expression's module.
-  bool forcePublicDecls() const { return ForcePublicDecls; }
-};
 
 /// Selector for type metadata symbol kinds.
 enum class TypeMetadataAddress {
