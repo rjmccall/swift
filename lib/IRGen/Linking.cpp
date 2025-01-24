@@ -79,15 +79,15 @@ bool swift::irgen::useDllStorage(const llvm::Triple &triple) {
   return triple.isOSBinFormatCOFF() && !triple.isOSCygMing();
 }
 
-UniversalLinkageInfo::UniversalLinkageInfo(IRGenModule &IGM)
-    : UniversalLinkageInfo(IGM.Triple, IGM.IRGen.hasMultipleIGMs(),
-                           IGM.IRGen.Opts.ForcePublicLinkage,
-                           IGM.IRGen.Opts.InternalizeSymbols) {}
+LinkContext::LinkContext(IRGenModule &IGM)
+    : LinkContext(IGM.Triple, IGM.IRGen.hasMultipleIGMs(),
+                  IGM.IRGen.Opts.ForcePublicLinkage,
+                  IGM.IRGen.Opts.InternalizeSymbols) {}
 
-UniversalLinkageInfo::UniversalLinkageInfo(const llvm::Triple &triple,
-                                           bool hasMultipleIGMs,
-                                           bool forcePublicDecls,
-                                           bool isStaticLibrary)
+LinkContext::LinkContext(const llvm::Triple &triple,
+                         bool hasMultipleIGMs,
+                         bool forcePublicDecls,
+                         bool isStaticLibrary)
     : IsELFObject(triple.isOSBinFormatELF()),
       IsMSVCEnvironment(triple.isWindowsMSVCEnvironment()),
       UseDLLStorage(useDllStorage(triple)), Internalize(isStaticLibrary),

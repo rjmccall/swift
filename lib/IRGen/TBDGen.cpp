@@ -461,7 +461,7 @@ void TBDGenVisitor::addGlobalVar(VarDecl *VD) {
 
 void TBDGenVisitor::addLinkEntity(LinkEntity entity) {
   auto linkage =
-      LinkInfo::get(UniversalLinkInfo, SwiftModule, entity, ForDefinition);
+      LinkInfo::get(LinkCtx, SwiftModule, entity, ForDefinition);
 
   SymbolFlags flags = entity.isData() ? SymbolFlags::Data : SymbolFlags::Text;
   addSymbol(linkage.getName(), SymbolSource::forIRLinkEntity(entity), flags);
@@ -518,7 +518,7 @@ void TBDGenVisitor::visit(const TBDGenDescriptor &desc) {
   opts.FragileResilientProtocols = Opts.FragileResilientProtocols;
 
   auto silVisitorCtx = SILSymbolVisitorContext(SwiftModule, opts);
-  auto visitorCtx = IRSymbolVisitorContext{UniversalLinkInfo, silVisitorCtx};
+  auto visitorCtx = IRSymbolVisitorContext{LinkCtx, silVisitorCtx};
 
   // Add any autolinking force_load symbols.
   addFirstFileSymbols();

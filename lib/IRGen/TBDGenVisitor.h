@@ -96,7 +96,7 @@ class TBDGenVisitor : public IRSymbolVisitor {
   std::optional<llvm::DataLayout> DataLayout = std::nullopt;
   const StringRef DataLayoutDescription;
 
-  UniversalLinkageInfo UniversalLinkInfo;
+  LinkContext LinkCtx;
   ModuleDecl *SwiftModule;
   const TBDGenOptions &Opts;
   APIRecorder &recorder;
@@ -125,8 +125,8 @@ public:
                 ModuleDecl *swiftModule, const TBDGenOptions &opts,
                 APIRecorder &recorder)
       : DataLayoutDescription(dataLayoutString),
-        UniversalLinkInfo(target, opts.HasMultipleIGMs, /*forcePublic*/ false,
-                          /*static=*/false),
+        LinkCtx(target, opts.HasMultipleIGMs, /*forcePublic*/ false,
+                /*static=*/false),
         SwiftModule(swiftModule), Opts(opts), recorder(recorder),
         previousInstallNameMap(parsePreviousModuleInstallNameMap()) {}
 

@@ -22,7 +22,7 @@ namespace irgen {
 class IRGenModule;
 
 /// The emission context of a linkage computation.
-class UniversalLinkageInfo {
+class LinkContext {
 public:
   bool IsELFObject;
   bool IsMSVCEnvironment;
@@ -36,10 +36,10 @@ public:
   /// be promoted to public external. Used by the LLDB expression evaluator.
   bool ForcePublicDecls;
 
-  UniversalLinkageInfo(IRGenModule &IGM);
+  LinkContext(IRGenModule &IGM);
 
-  UniversalLinkageInfo(const llvm::Triple &triple, bool hasMultipleIGMs,
-                       bool forcePublicDecls, bool isStaticLibrary);
+  LinkContext(const llvm::Triple &triple, bool hasMultipleIGMs,
+              bool forcePublicDecls, bool isStaticLibrary);
 
   /// In case of multiple llvm modules (in multi-threaded compilation) all
   /// private decls must be visible from other files.

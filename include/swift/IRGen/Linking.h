@@ -1699,7 +1699,7 @@ public:
   static LinkInfo get(IRGenModule &IGM, const LinkEntity &entity,
                       ForDefinition_t forDefinition);
 
-  static LinkInfo get(const UniversalLinkageInfo &linkInfo,
+  static LinkInfo get(const LinkContext &linkCtx,
                       ModuleDecl *swiftModule,
                       const LinkEntity &entity,
                       ForDefinition_t forDefinition);

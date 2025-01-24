@@ -23,15 +23,15 @@ namespace irgen {
 
 /// Context for symbol enumeration using `IRSymbolVisitor`.
 class IRSymbolVisitorContext {
-  const UniversalLinkageInfo &LinkInfo;
+  const LinkContext &LinkCtx;
   const SILSymbolVisitorContext &SILCtx;
 
 public:
-  IRSymbolVisitorContext(const UniversalLinkageInfo &LinkInfo,
+  IRSymbolVisitorContext(const LinkContext &LinkCtx,
                          const SILSymbolVisitorContext &SILCtx)
-      : LinkInfo{LinkInfo}, SILCtx{SILCtx} {}
+      : LinkCtx{LinkCtx}, SILCtx{SILCtx} {}
 
-  const UniversalLinkageInfo &getLinkInfo() const { return LinkInfo; }
+  const LinkContext &getLinkCtx() const { return LinkCtx; }
   const SILSymbolVisitorContext &getSILCtx() const { return SILCtx; }
 };
 

@@ -2219,7 +2219,7 @@ void IRGenerator::emitEntryPointInfo() {
 }
 
 static IRLinkage
-getIRLinkage(StringRef name, const UniversalLinkageInfo &info,
+getIRLinkage(StringRef name, const LinkContext &ctx,
              SILLinkage linkage, ForDefinition_t isDefinition,
              bool isWeakImported, bool isKnownLocal = false) {
 #define RESULT(LINKAGE, VISIBILITY, DLL_STORAGE)                               \
@@ -2230,7 +2230,7 @@ getIRLinkage(StringRef name, const UniversalLinkageInfo &info,
   // This is a synthetic symbol that is referenced for `#dsohandle` and is never
   // a definition but needs to be handled as a definition as it will be provided
   // by the linker. This is a MSVC extension that is honoured by lld as well.
-  if (info.IsMSVCEnvironment && name == "__ImageBase")
+  if (ctx.IsMSVCEnvironment && name == "__ImageBase")
     return RESULT(External, Default, Default);
 
   // Use protected visibility for public symbols we define on ELF.  ld.so
@@ -2238,21 +2238,21 @@ getIRLinkage(StringRef name, const UniversalLinkageInfo &info,
   // our metadata formats.  Default visibility should suffice for other object
   // formats.
   llvm::GlobalValue::VisibilityTypes PublicDefinitionVisibility =
-      info.IsELFObject ? llvm::GlobalValue::ProtectedVisibility
-                       : llvm::GlobalValue::DefaultVisibility;
+      ctx.IsELFObject ? llvm::GlobalValue::ProtectedVisibility
+                      : llvm::GlobalValue::DefaultVisibility;
   llvm::GlobalValue::DLLStorageClassTypes ExportedStorage =
-      info.UseDLLStorage ? llvm::GlobalValue::DLLExportStorageClass
-                         : llvm::GlobalValue::DefaultStorageClass;
+      ctx.UseDLLStorage ? llvm::GlobalValue::DLLExportStorageClass
+                        : llvm::GlobalValue::DefaultStorageClass;
   llvm::GlobalValue::DLLStorageClassTypes ImportedStorage =
-      info.UseDLLStorage ? llvm::GlobalValue::DLLImportStorageClass
-                         : llvm::GlobalValue::DefaultStorageClass;
+      ctx.UseDLLStorage ? llvm::GlobalValue::DLLImportStorageClass
+                        : llvm::GlobalValue::DefaultStorageClass;
 
   switch (linkage) {
   case SILLinkage::Public:
   case SILLinkage::Package:
     return {llvm::GlobalValue::ExternalLinkage, PublicDefinitionVisibility,
-            info.Internalize ? llvm::GlobalValue::DefaultStorageClass
-                             : ExportedStorage};
+            ctx.Internalize ? llvm::GlobalValue::DefaultStorageClass
+                            : ExportedStorage};
 
   case SILLinkage::PublicNonABI:
   case SILLinkage::PackageNonABI:
@@ -2267,14 +2267,14 @@ getIRLinkage(StringRef name, const UniversalLinkageInfo &info,
     return RESULT(External, Hidden, Default);
 
   case SILLinkage::Private: {
-    if (info.forcePublicDecls() && !isDefinition)
-      return getIRLinkage(name, info, SILLinkage::PublicExternal, isDefinition,
+    if (ctx.forcePublicDecls() && !isDefinition)
+      return getIRLinkage(name, ctx, SILLinkage::PublicExternal, isDefinition,
                           isWeakImported, isKnownLocal);
 
-    auto linkage = info.needLinkerToMergeDuplicateSymbols()
+    auto linkage = ctx.needLinkerToMergeDuplicateSymbols()
                        ? llvm::GlobalValue::LinkOnceODRLinkage
                        : llvm::GlobalValue::InternalLinkage;
-    auto visibility = info.shouldAllPrivateDeclsBeVisibleFromOtherFiles()
+    auto visibility = ctx.shouldAllPrivateDeclsBeVisibleFromOtherFiles()
                           ? llvm::GlobalValue::HiddenVisibility
                           : llvm::GlobalValue::DefaultVisibility;
     return {linkage, visibility, llvm::GlobalValue::DefaultStorageClass};
@@ -2314,7 +2314,7 @@ void irgen::updateLinkageForDefinition(IRGenModule &IGM,
                                        const LinkEntity &entity) {
   // TODO: there are probably cases where we can avoid redoing the
   // entire linkage computation.
-  UniversalLinkageInfo linkInfo(IGM);
+  LinkContext linkCtx(IGM);
   bool weakImported = entity.isWeakImported(IGM.getSwiftModule());
 
   bool isKnownLocal = entity.isAlwaysSharedLinkage();
@@ -2324,7 +2324,7 @@ void irgen::updateLinkageForDefinition(IRGenModule &IGM,
 
   auto IRL =
       getIRLinkage(global->hasName() ? global->getName() : StringRef(),
-                   linkInfo, entity.getLinkage(ForDefinition), ForDefinition,
+                   linkCtx, entity.getLinkage(ForDefinition), ForDefinition,
                    weakImported, isKnownLocal);
   ApplyIRLinkage(IRL).to(global);
 
@@ -2334,12 +2334,12 @@ void irgen::updateLinkageForDefinition(IRGenModule &IGM,
 
 LinkInfo LinkInfo::get(IRGenModule &IGM, const LinkEntity &entity,
                        ForDefinition_t isDefinition) {
-  return LinkInfo::get(UniversalLinkageInfo(IGM),
+  return LinkInfo::get(LinkContext(IGM),
                        IGM.getSwiftModule(),
                        entity, isDefinition);
 }
 
-LinkInfo LinkInfo::get(const UniversalLinkageInfo &linkInfo,
+LinkInfo LinkInfo::get(const LinkContext &linkInfo,
                        ModuleDecl *swiftModule,
                        const LinkEntity &entity,
                        ForDefinition_t isDefinition) {
