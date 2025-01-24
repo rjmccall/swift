@@ -2378,17 +2378,6 @@ LinkInfo LinkInfo::get(const UniversalLinkageInfo &linkInfo,
   return result;
 }
 
-LinkInfo LinkInfo::get(const UniversalLinkageInfo &linkInfo, StringRef name,
-                       SILLinkage linkage, ForDefinition_t isDefinition,
-                       bool isWeakImported) {
-  LinkInfo result;
-  result.Name += name;
-  result.IRL = getIRLinkage(name, linkInfo, linkage, isDefinition,
-                            isWeakImported, linkInfo.Internalize);
-  result.ForDefinition = isDefinition;
-  return result;
-}
-
 /// Get or create an LLVM function with these linkage rules.
 llvm::Function *irgen::createFunction(IRGenModule &IGM, LinkInfo &linkInfo,
                                       const Signature &signature,

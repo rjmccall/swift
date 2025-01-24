@@ -1740,10 +1740,6 @@ public:
                       const LinkEntity &entity,
                       ForDefinition_t forDefinition);
 
-  static LinkInfo get(const UniversalLinkageInfo &linkInfo, StringRef name,
-                      SILLinkage linkage, ForDefinition_t isDefinition,
-                      bool isWeakImported);
-
   StringRef getName() const {
     return Name.str();
   }
