@@ -33,6 +33,7 @@
 #include "swift/Basic/LLVM.h"
 #include "swift/Basic/OptimizationMode.h"
 #include "swift/Basic/SuccessorMap.h"
+#include "swift/IRGen/LinkContext.h"
 #include "swift/IRGen/ValueWitness.h"
 #include "swift/SIL/RuntimeEffect.h"
 #include "swift/SIL/SILFunction.h"
@@ -669,6 +670,7 @@ public:
   Lowering::TypeConverter &getSILTypes() const;
   SILModule &getSILModule() const { return IRGen.SIL; }
   const IRGenOptions &getOptions() const { return IRGen.Opts; }
+  LinkContext getLinkContext() const;
   SILModuleConventions silConv;
   ModuleDecl *ObjCModule = nullptr;
   ModuleDecl *ClangImporterModule = nullptr;

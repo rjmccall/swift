@@ -199,7 +199,7 @@ TBDGenVisitor::parsePreviousModuleInstallNameMap() {
   if (FileName.empty())
     return nullptr;
   namespace yaml = llvm::yaml;
-  ASTContext &Ctx = SwiftModule->getASTContext();
+  ASTContext &Ctx = LinkCtx.SwiftModule->getASTContext();
   std::unique_ptr<std::map<std::string, InstallNameStore>> pResult(
     new std::map<std::string, InstallNameStore>());
   auto &AllInstallNames = *pResult;
@@ -461,7 +461,7 @@ void TBDGenVisitor::addGlobalVar(VarDecl *VD) {
 
 void TBDGenVisitor::addLinkEntity(LinkEntity entity) {
   auto linkage =
-      LinkInfo::get(LinkCtx, SwiftModule, entity, ForDefinition);
+      LinkInfo::get(LinkCtx, entity, ForDefinition);
 
   SymbolFlags flags = entity.isData() ? SymbolFlags::Data : SymbolFlags::Text;
   addSymbol(linkage.getName(), SymbolSource::forIRLinkEntity(entity), flags);
@@ -517,23 +517,23 @@ void TBDGenVisitor::visit(const TBDGenDescriptor &desc) {
   opts.VirtualFunctionElimination = Opts.VirtualFunctionElimination;
   opts.FragileResilientProtocols = Opts.FragileResilientProtocols;
 
-  auto silVisitorCtx = SILSymbolVisitorContext(SwiftModule, opts);
+  auto silVisitorCtx = SILSymbolVisitorContext(LinkCtx.SwiftModule, opts);
   auto visitorCtx = IRSymbolVisitorContext{LinkCtx, silVisitorCtx};
 
   // Add any autolinking force_load symbols.
   addFirstFileSymbols();
   
   if (auto *singleFile = desc.getSingleFile()) {
-    assert(SwiftModule == singleFile->getParentModule() &&
+    assert(LinkCtx.SwiftModule == singleFile->getParentModule() &&
            "mismatched file and module");
     visitFile(singleFile, visitorCtx);
     return;
   }
 
   llvm::SmallVector<ModuleDecl*, 4> Modules;
-  Modules.push_back(SwiftModule);
+  Modules.push_back(LinkCtx.SwiftModule);
 
-  auto &ctx = SwiftModule->getASTContext();
+  auto &ctx = LinkCtx.SwiftModule->getASTContext();
   for (auto Name: Opts.embedSymbolsFromModules) {
     if (auto *MD = ctx.getModuleByName(Name)) {
       // If it is a clang module, the symbols should be collected by TAPI.

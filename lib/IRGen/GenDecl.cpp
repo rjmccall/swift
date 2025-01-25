@@ -2314,7 +2314,7 @@ void irgen::updateLinkageForDefinition(IRGenModule &IGM,
                                        const LinkEntity &entity) {
   // TODO: there are probably cases where we can avoid redoing the
   // entire linkage computation.
-  LinkContext linkCtx(IGM);
+  LinkContext linkCtx = IGM.getLinkContext();
   bool weakImported = entity.isWeakImported(IGM.getSwiftModule());
 
   bool isKnownLocal = entity.isAlwaysSharedLinkage();
@@ -2334,15 +2334,14 @@ void irgen::updateLinkageForDefinition(IRGenModule &IGM,
 
 LinkInfo LinkInfo::get(IRGenModule &IGM, const LinkEntity &entity,
                        ForDefinition_t isDefinition) {
-  return LinkInfo::get(LinkContext(IGM),
-                       IGM.getSwiftModule(),
-                       entity, isDefinition);
+  return LinkInfo::get(IGM.getLinkContext(), entity, isDefinition);
 }
 
 LinkInfo LinkInfo::get(const LinkContext &linkInfo,
-                       ModuleDecl *swiftModule,
                        const LinkEntity &entity,
                        ForDefinition_t isDefinition) {
+  auto swiftModule = linkInfo.SwiftModule;
+
   LinkInfo result;
   entity.mangle(swiftModule->getASTContext(), result.Name);
 

@@ -24,6 +24,8 @@ class IRGenModule;
 /// The emission context of a linkage computation.
 class LinkContext {
 public:
+  ModuleDecl *SwiftModule;
+
   bool IsELFObject;
   bool IsMSVCEnvironment;
   bool UseDLLStorage;
@@ -36,9 +38,10 @@ public:
   /// be promoted to public external. Used by the LLDB expression evaluator.
   bool ForcePublicDecls;
 
-  LinkContext(IRGenModule &IGM);
+  static LinkContext get(IRGenModule &IGM);
 
-  LinkContext(const llvm::Triple &triple, bool hasMultipleIGMs,
+  LinkContext(ModuleDecl *swiftModule, const llvm::Triple &triple,
+              bool hasMultipleIGMs,
               bool forcePublicDecls, bool isStaticLibrary);
 
   /// In case of multiple llvm modules (in multi-threaded compilation) all

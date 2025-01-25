@@ -52,8 +52,7 @@ class IRSymbolVisitorImpl : public SILSymbolVisitor {
   void addLinkEntity(LinkEntity entity, bool ignoreVisibility = false) {
     if (!ignoreVisibility) {
       auto linkage =
-          LinkInfo::get(Ctx.getLinkCtx(), Ctx.getSILCtx().getModule(), entity,
-                        ForDefinition);
+          LinkInfo::get(Ctx.getLinkCtx(), entity, ForDefinition);
 
       auto externallyVisible =
           llvm::GlobalValue::isExternalLinkage(linkage.getLinkage()) &&

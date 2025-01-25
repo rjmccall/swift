@@ -163,7 +163,7 @@ getSymbolAddrsForDecl(IRGenModule &IGM, ValueDecl *decl,
   SILSymbolVisitorOptions opts;
   opts.VisitMembers = false;
   auto silCtx = SILSymbolVisitorContext(IGM.getSwiftModule(), opts);
-  auto linkCtx = LinkContext(IGM);
+  auto linkCtx = IGM.getLinkContext();
   auto symbolVisitorCtx = IRSymbolVisitorContext(linkCtx, silCtx);
   HasSymbolIRGenVisitor(IGM, addrs).visit(decl, symbolVisitorCtx);
 }

@@ -97,7 +97,6 @@ class TBDGenVisitor : public IRSymbolVisitor {
   const StringRef DataLayoutDescription;
 
   LinkContext LinkCtx;
-  ModuleDecl *SwiftModule;
   const TBDGenOptions &Opts;
   APIRecorder &recorder;
 
@@ -125,9 +124,9 @@ public:
                 ModuleDecl *swiftModule, const TBDGenOptions &opts,
                 APIRecorder &recorder)
       : DataLayoutDescription(dataLayoutString),
-        LinkCtx(target, opts.HasMultipleIGMs, /*forcePublic*/ false,
+        LinkCtx(swiftModule, target, opts.HasMultipleIGMs, /*forcePublic*/ false,
                 /*static=*/false),
-        SwiftModule(swiftModule), Opts(opts), recorder(recorder),
+        Opts(opts), recorder(recorder),
         previousInstallNameMap(parsePreviousModuleInstallNameMap()) {}
 
   /// Create a new visitor using the target and layout information from a
