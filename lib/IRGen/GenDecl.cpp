@@ -2218,10 +2218,33 @@ void IRGenerator::emitEntryPointInfo() {
   IGM.addUsedGlobal(var);
 }
 
+bool AbstractLinkInfo::isKnownLocal(const LinkContext &ctx) const {
+  switch (Linkage) {
+  case SILLinkage::Private:
+  case SILLinkage::Shared:
+  case SILLinkage::Hidden:
+  case SILLinkage::HiddenExternal:
+  case SILLinkage::PublicNonABI:
+  case SILLinkage::PackageNonABI:
+    return true;
+
+  case SILLinkage::Public:
+  case SILLinkage::PublicExternal:
+  case SILLinkage::Package:
+  case SILLinkage::PackageExternal:
+    // Be conservative if we don't have a defining DC.
+    if (!DefiningDC) return false;
+
+    auto definingModule = DefiningDC->getParentModule();
+    return (ctx.SwiftModule == definingModule ||
+            definingModule->isStaticLibrary());
+  }
+}
+
 static IRLinkage
 getIRLinkage(StringRef name, const LinkContext &ctx,
              SILLinkage linkage, ForDefinition_t isDefinition,
-             bool isWeakImported, bool isKnownLocal = false) {
+             bool isWeakImported, bool isKnownLocal) {
 #define RESULT(LINKAGE, VISIBILITY, DLL_STORAGE)                               \
   IRLinkage{llvm::GlobalValue::LINKAGE##Linkage,                               \
             llvm::GlobalValue::VISIBILITY##Visibility,                         \
@@ -2315,16 +2338,15 @@ void irgen::updateLinkageForDefinition(IRGenModule &IGM,
   // TODO: there are probably cases where we can avoid redoing the
   // entire linkage computation.
   LinkContext linkCtx = IGM.getLinkContext();
+  auto abstractLinkInfo = entity.getLinkage(IGM.Context, ForDefinition);
+
   bool weakImported = entity.isWeakImported(IGM.getSwiftModule());
 
-  bool isKnownLocal = entity.isAlwaysSharedLinkage();
-  if (const auto *DC = entity.getDeclContextForEmission())
-    if (const auto *MD = DC->getParentModule())
-      isKnownLocal = IGM.getSwiftModule() == MD || MD->isStaticLibrary();
+  bool isKnownLocal = abstractLinkInfo.isKnownLocal(linkCtx);
 
   auto IRL =
       getIRLinkage(global->hasName() ? global->getName() : StringRef(),
-                   linkCtx, entity.getLinkage(ForDefinition), ForDefinition,
+                   linkCtx, abstractLinkInfo.getSILLinkage(), ForDefinition,
                    weakImported, isKnownLocal);
   ApplyIRLinkage(IRL).to(global);
 
@@ -2337,41 +2359,21 @@ LinkInfo LinkInfo::get(IRGenModule &IGM, const LinkEntity &entity,
   return LinkInfo::get(IGM.getLinkContext(), entity, isDefinition);
 }
 
-LinkInfo LinkInfo::get(const LinkContext &linkInfo,
+LinkInfo LinkInfo::get(const LinkContext &linkCtx,
                        const LinkEntity &entity,
                        ForDefinition_t isDefinition) {
-  auto swiftModule = linkInfo.SwiftModule;
+  auto swiftModule = linkCtx.SwiftModule;
+  auto &ctx = swiftModule->getASTContext();
 
   LinkInfo result;
-  entity.mangle(swiftModule->getASTContext(), result.Name);
+  entity.mangle(ctx, result.Name);
 
-  bool isKnownLocal = entity.isAlwaysSharedLinkage();
-  if (const auto *DC = entity.getDeclContextForEmission()) {
-    if (const auto *MD = DC->getParentModule())
-      isKnownLocal = MD == swiftModule || MD->isStaticLibrary();
-    if (!isKnownLocal && !isDefinition) {
-      bool isClangImportedEntity =
-          isa<ClangModuleUnit>(DC->getModuleScopeContext());
-      // Nominal type descriptor for a type imported from a Clang module
-      // is always a local declaration as it's generated on demand. When WMO is
-      // off, it's emitted into the current file's object file. When WMO is on,
-      // it's emitted into one of the object files in the current module, and
-      // thus it's never imported from outside of the module.
-      if (isClangImportedEntity && entity.isNominalTypeDescriptor())
-        isKnownLocal = true;
-    }
-  } else if (entity.hasSILFunction()) {
-    // SIL serialized entities (functions, witness tables, vtables) do not have
-    // an associated DeclContext and are serialized into the current module.  As
-    // a result, we explicitly handle SIL Functions here. We do not expect other
-    // types to be referenced directly.
-    if (const auto *MD = entity.getSILFunction()->getParentModule())
-      isKnownLocal = MD == swiftModule || MD->isStaticLibrary();
-  }
+  auto abstractLinkInfo = entity.getLinkage(ctx, isDefinition);
 
+  bool isKnownLocal = abstractLinkInfo.isKnownLocal(linkCtx);
   bool weakImported = entity.isWeakImported(swiftModule);
-  result.IRL = getIRLinkage(result.Name, linkInfo,
-                            entity.getLinkage(isDefinition), isDefinition,
+  result.IRL = getIRLinkage(result.Name, linkCtx,
+                            abstractLinkInfo.getSILLinkage(), isDefinition,
                             weakImported, isKnownLocal);
   result.ForDefinition = isDefinition;
   return result;

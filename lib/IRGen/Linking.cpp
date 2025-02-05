@@ -79,6 +79,32 @@ bool swift::irgen::useDllStorage(const llvm::Triple &triple) {
   return triple.isOSBinFormatCOFF() && !triple.isOSCygMing();
 }
 
+AbstractLinkInfo AbstractLinkInfo::get(FormalLinkage formalLinkage,
+                                       DeclContext *definingDC,
+                                       ForDefinition_t forDefinition) {
+  return get(swift::getSILLinkage(formalLinkage, forDefinition),
+             definingDC);
+}
+
+AbstractLinkInfo
+AbstractLinkInfo::forRuntimeEntity(const ASTContext &ctx) {
+  return get(SILLinkage::PublicExternal, ctx.getStdlibModule());
+}
+
+AbstractLinkInfo
+AbstractLinkInfo::forDeclDefinedEntity(const ValueDecl *decl,
+                                       ForDefinition_t forDefinition) {
+  return get(getDeclLinkage(decl), decl->getDeclContext(), forDefinition);
+}
+
+AbstractLinkInfo
+AbstractLinkInfo::forConformanceDefinedEntity(const ProtocolConformance *conf,
+                                              ForDefinition_t forDefinition) {
+  auto rootConf = conf->getRootConformance();
+  return get(getLinkageForProtocolConformance(rootConf, forDefinition),
+             rootConf->getDeclContext());
+}
+
 LinkContext IRGenModule::getLinkContext() const {
   return LinkContext(getSwiftModule(), Triple,
                      IRGen.hasMultipleIGMs(),
@@ -583,13 +609,9 @@ SILDeclRef LinkEntity::getSILDeclRef() const {
   return ref;
 }
 
-SILLinkage LinkEntity::getLinkage(ForDefinition_t forDefinition) const {
-  // For when `this` is a protocol conformance of some kind.
-  auto getLinkageAsConformance = [&] {
-    return getLinkageForProtocolConformance(
-        getProtocolConformance()->getRootConformance(), forDefinition);
-  };
-
+AbstractLinkInfo
+LinkEntity::getLinkage(ASTContext &ctx,
+                       ForDefinition_t forDefinition) const {
   switch (getKind()) {
   case Kind::DispatchThunk:
   case Kind::DispatchThunkDerivative:
@@ -605,7 +627,7 @@ SILLinkage LinkEntity::getLinkage(ForDefinition_t forDefinition) const {
     if (auto *proto = dyn_cast<ProtocolDecl>(decl->getDeclContext()))
       decl = proto;
 
-    return getSILLinkage(getDeclLinkage(decl), forDefinition);
+    return AbstractLinkInfo::forDeclDefinedEntity(decl, forDefinition);
   }
 
   // Most type metadata depend on the formal linkage of their type.
@@ -613,15 +635,17 @@ SILLinkage LinkEntity::getLinkage(ForDefinition_t forDefinition) const {
     auto type = getType();
 
     // Builtin types, (), () -> () and so on are in the runtime.
-    if (!type.getAnyNominal())
-      return getSILLinkage(FormalLinkage::PublicUnique, forDefinition);
+    if (!type.getAnyNominal()) {
+      assert(!forDefinition);
+      return AbstractLinkInfo::forRuntimeEntity(ctx);
+    }
 
     // Imported types.
     if (isAccessorLazilyGenerated(getTypeMetadataAccessStrategy(type)))
-      return SILLinkage::Shared;
+      return AbstractLinkInfo::getShared();
 
     // Everything else is only referenced inside its module.
-    return SILLinkage::Private;
+    return AbstractLinkInfo::getPrivate();
   }
 
   case Kind::ObjCMetadataUpdateFunction:
@@ -630,25 +654,25 @@ SILLinkage LinkEntity::getLinkage(ForDefinition_t forDefinition) const {
   case Kind::TypeMetadataSingletonInitializationCache:
   case Kind::TypeMetadataCompletionFunction:
   case Kind::TypeMetadataPattern:
-    return SILLinkage::Private;
+    return AbstractLinkInfo::getPrivate();
 
   case Kind::TypeMetadataLazyCacheVariable: {
     auto type = getType();
 
     // Imported types, non-primitive structural types.
     if (isAccessorLazilyGenerated(getTypeMetadataAccessStrategy(type)))
-      return SILLinkage::Shared;
+      return AbstractLinkInfo::getShared();
 
     // Everything else is only referenced inside its module.
-    return SILLinkage::Private;
+    return AbstractLinkInfo::getPrivate();
   }
       
   case Kind::TypeMetadataDemanglingCacheVariable:
-    return SILLinkage::Shared;
+    return AbstractLinkInfo::getShared();
 
   case Kind::TypeMetadata: {
     if (isForcedShared())
-      return SILLinkage::Shared;
+      return AbstractLinkInfo::getShared();
 
     auto *nominal = getType().getAnyNominal();
     switch (getMetadataAddress()) {
@@ -656,20 +680,24 @@ SILLinkage LinkEntity::getLinkage(ForDefinition_t forDefinition) const {
       // For imported types, the full metadata object is a candidate
       // for uniquing.
       if (getDeclLinkage(nominal) == FormalLinkage::PublicNonUnique)
-        return SILLinkage::Shared;
+        return AbstractLinkInfo::getShared();
 
       // Prespecialization of the same generic metadata may be requested 
       // multiple times within the same module, so it needs to be uniqued.
       if (nominal->isGenericContext())
-        return SILLinkage::Shared;
+        return AbstractLinkInfo::getShared();
 
       // The full metadata object is private to the containing module.
-      return SILLinkage::Private;
+      return AbstractLinkInfo::getPrivate();
     case TypeMetadataAddress::AddressPoint: {
-      return getSILLinkage(nominal
-                           ? getDeclLinkage(nominal)
-                           : FormalLinkage::PublicUnique,
-                           forDefinition);
+      if (nominal) {
+        return AbstractLinkInfo::forDeclDefinedEntity(nominal, forDefinition);
+
+      // Otherwise, this must be predefined metadata in the stdlib.
+      } else {
+        assert(!forDefinition);
+        return AbstractLinkInfo::forRuntimeEntity(ctx);
+      }
     }
     }
     llvm_unreachable("bad kind");
@@ -679,53 +707,66 @@ SILLinkage LinkEntity::getLinkage(ForDefinition_t forDefinition) const {
   case Kind::NoncanonicalSpecializedGenericTypeMetadataCacheVariable:
     // Prespecialization of the same non-canonical generic metadata may be
     // requested multiple times, so it needs to be uniqued.
-    return SILLinkage::Shared;
+    return AbstractLinkInfo::getShared();
 
   // ...but we don't actually expose individual value witnesses (right now).
   case Kind::ValueWitness: {
     auto *nominal = getType().getAnyNominal();
     if (nominal && getDeclLinkage(nominal) == FormalLinkage::PublicNonUnique)
-      return SILLinkage::Shared;
+      return AbstractLinkInfo::getShared();
     assert(forDefinition);
-    return SILLinkage::Private;
+    return AbstractLinkInfo::getPrivate();
   }
 
-  case Kind::TypeMetadataAccessFunction:
+  case Kind::TypeMetadataAccessFunction: {
+    auto nominal = getType().getAnyNominal();
     switch (getTypeMetadataAccessStrategy(getType())) {
     case MetadataAccessStrategy::PublicUniqueAccessor:
-      return getSILLinkage(FormalLinkage::PublicUnique, forDefinition);
+      assert(nominal);
+      return AbstractLinkInfo::get(FormalLinkage::PublicUnique,
+                                  nominal->getDeclContext(),
+                                  forDefinition);
     case MetadataAccessStrategy::PackageUniqueAccessor:
-      return getSILLinkage(FormalLinkage::PackageUnique, forDefinition);
+      assert(nominal);
+      return AbstractLinkInfo::get(FormalLinkage::PackageUnique,
+                                  nominal->getDeclContext(),
+                                  forDefinition);
     case MetadataAccessStrategy::HiddenUniqueAccessor:
-      return getSILLinkage(FormalLinkage::HiddenUnique, forDefinition);
+      assert(nominal);
+      return AbstractLinkInfo::get(FormalLinkage::HiddenUnique,
+                                  nominal->getDeclContext(),
+                                  forDefinition);
     case MetadataAccessStrategy::PrivateAccessor:
-      return getSILLinkage(FormalLinkage::Private, forDefinition);
+      assert(nominal);
+      return AbstractLinkInfo::get(FormalLinkage::Private,
+                                  nominal->getDeclContext(),
+                                  forDefinition);
     case MetadataAccessStrategy::ForeignAccessor:
     case MetadataAccessStrategy::NonUniqueAccessor:
-      return SILLinkage::Shared;
+      return AbstractLinkInfo::getShared();
     }
     llvm_unreachable("bad metadata access kind");
+  }
 
   case Kind::CanonicalSpecializedGenericTypeMetadataAccessFunction:
-    return SILLinkage::Shared;
+    return AbstractLinkInfo::getShared();
 
   case Kind::ObjCClassRef:
-    return SILLinkage::Private;
+    return AbstractLinkInfo::getPrivate();
 
   // Continuation prototypes need to be external or else LLVM will fret.
   case Kind::CoroutineContinuationPrototype:
-    return SILLinkage::PublicExternal;
+    return AbstractLinkInfo::forPrototypeDeclaration();
 
   case Kind::ObjCResilientClassStub: {
     switch (getMetadataAddress()) {
     case TypeMetadataAddress::FullMetadata:
       // The full class stub object is private to the containing module,
       // except for foreign types.
-      return SILLinkage::Private;
+      return AbstractLinkInfo::getPrivate();
     case TypeMetadataAddress::AddressPoint: {
       auto *classDecl = cast<ClassDecl>(getDecl());
-      return getSILLinkage(getDeclLinkage(classDecl),
-                           forDefinition);
+      return AbstractLinkInfo::forDeclDefinedEntity(classDecl, forDefinition);
     }
     }
     llvm_unreachable("invalid metadata address");
@@ -733,7 +774,7 @@ SILLinkage LinkEntity::getLinkage(ForDefinition_t forDefinition) const {
 
   case Kind::EnumCase: {
     auto *elementDecl = cast<EnumElementDecl>(getDecl());
-    return getSILLinkage(getDeclLinkage(elementDecl), forDefinition);
+    return AbstractLinkInfo::forDeclDefinedEntity(elementDecl, forDefinition);
   }
 
   case Kind::FieldOffset: {
@@ -752,7 +793,8 @@ SILLinkage LinkEntity::getLinkage(ForDefinition_t forDefinition) const {
         linkage = FormalLinkage::HiddenUnique;
     }
 
-    return getSILLinkage(linkage, forDefinition);
+    return AbstractLinkInfo::get(linkage, varDecl->getDeclContext(),
+                                forDefinition);
   }
 
   case Kind::PropertyDescriptor: {
@@ -761,7 +803,7 @@ SILLinkage LinkEntity::getLinkage(ForDefinition_t forDefinition) const {
     // accessor is @inlinable or @usableFromInline)
     auto getterDecl = cast<AbstractStorageDecl>(getDecl())
       ->getOpaqueAccessor(AccessorKind::Get);
-    return getSILLinkage(getDeclLinkage(getterDecl), forDefinition);
+    return AbstractLinkInfo::forDeclDefinedEntity(getterDecl, forDefinition);
   }
 
   case Kind::OpaqueTypeDescriptor: {
@@ -777,9 +819,28 @@ SILLinkage LinkEntity::getLinkage(ForDefinition_t forDefinition) const {
     // so that TBD files don't include a bogus symbol.
     auto *srcDecl = opaqueType->getNamingDecl();
     if (srcDecl->getAttrs().hasAttribute<AlwaysEmitIntoClientAttr>())
-      return SILLinkage::Shared;
+      return AbstractLinkInfo::getShared();
 
-    return getSILLinkage(getDeclLinkage(opaqueType), forDefinition);
+    return AbstractLinkInfo::forDeclDefinedEntity(opaqueType, forDefinition);
+  }
+
+  case Kind::NominalTypeDescriptor: {
+    auto decl = getDecl();
+
+    // The nominal type descriptor for a type imported from a Clang module
+    // is always a local declaration, as it's generated on demand. When
+    // WMO is off, it's emitted into the current file's object file. When
+    // WMO is on, it's emitted into one of the object files in the current
+    // module, and thus it's never imported from outside of the module.
+    bool isClangImportedEntity =
+      isa<ClangModuleUnit>(decl->getDeclContext()->getModuleScopeContext());
+    if (isClangImportedEntity) {
+      return (forDefinition
+                ? AbstractLinkInfo::getShared()
+                : AbstractLinkInfo::get(SILLinkage::HiddenExternal, nullptr));
+    }
+
+    return AbstractLinkInfo::forDeclDefinedEntity(decl, forDefinition);
   }
 
   case Kind::AssociatedConformanceDescriptor:
@@ -787,7 +848,6 @@ SILLinkage LinkEntity::getLinkage(ForDefinition_t forDefinition) const {
   case Kind::ObjCClass:
   case Kind::ObjCMetaclass:
   case Kind::SwiftMetaclassStub:
-  case Kind::NominalTypeDescriptor:
   case Kind::NominalTypeDescriptorRecord:
   case Kind::ClassMetadataBaseOffset:
   case Kind::ProtocolDescriptor:
@@ -799,27 +859,31 @@ SILLinkage LinkEntity::getLinkage(ForDefinition_t forDefinition) const {
   case Kind::OpaqueTypeDescriptorAccessorImpl:
   case Kind::OpaqueTypeDescriptorAccessorKey:
   case Kind::OpaqueTypeDescriptorAccessorVar:
-    return getSILLinkage(getDeclLinkage(getDecl()), forDefinition);
+    return AbstractLinkInfo::forDeclDefinedEntity(getDecl(), forDefinition);
 
   case Kind::CanonicalSpecializedGenericSwiftMetaclassStub:
     // Prespecialization of the same generic class' metaclass may be requested
     // multiple times within the same module, so it needs to be uniqued.
-    return SILLinkage::Shared;
+    return AbstractLinkInfo::getShared();
 
   case Kind::AssociatedTypeDescriptor:
-    return getSILLinkage(getDeclLinkage(getAssociatedType()->getProtocol()),
-                         forDefinition);
+    return AbstractLinkInfo::forDeclDefinedEntity(
+                        getAssociatedType()->getProtocol(), forDefinition);
 
   case Kind::ProtocolWitnessTable:
   case Kind::ProtocolConformanceDescriptor:
   case Kind::ProtocolConformanceDescriptorRecord:
-    return getLinkageForProtocolConformance(getRootProtocolConformance(),
-                                            forDefinition);
+    return AbstractLinkInfo::forConformanceDefinedEntity(
+               getRootProtocolConformance(), forDefinition);
 
-  case Kind::ProtocolWitnessTablePattern:
-    if (getLinkageAsConformance() == SILLinkage::Shared)
-      return SILLinkage::Shared;
-    return SILLinkage::Private;
+  case Kind::ReflectionAssociatedTypeDescriptor:
+  case Kind::ProtocolWitnessTablePattern: {
+    auto result = AbstractLinkInfo::forConformanceDefinedEntity(
+                    getRootProtocolConformance(), forDefinition);
+    if (result.getSILLinkage() == SILLinkage::Shared)
+      return result;
+    return AbstractLinkInfo::getPrivate();
+  }
 
   case Kind::ProtocolWitnessTableLazyAccessFunction:
   case Kind::ProtocolWitnessTableLazyCacheVariable: {
@@ -831,11 +895,14 @@ SILLinkage LinkEntity::getLinkage(ForDefinition_t forDefinition) const {
           ->getSelfNominalTypeDecl();
     }
     assert(typeDecl);
-    if (getDeclLinkage(typeDecl) == FormalLinkage::Private ||
-        getLinkageAsConformance() == SILLinkage::Private) {
-      return SILLinkage::Private;
+    if (getDeclLinkage(typeDecl) == FormalLinkage::Private)
+      return AbstractLinkInfo::getPrivate();
+    auto result = AbstractLinkInfo::forConformanceDefinedEntity(
+        getRootProtocolConformance(), forDefinition);
+    if (result.getSILLinkage() == SILLinkage::Private) {
+      return AbstractLinkInfo::getPrivate();
     } else {
-      return SILLinkage::Shared;
+      return AbstractLinkInfo::getShared();
     }
   }
 
@@ -843,31 +910,45 @@ SILLinkage LinkEntity::getLinkage(ForDefinition_t forDefinition) const {
   case Kind::DefaultAssociatedConformanceAccessor:
   case Kind::GenericProtocolWitnessTableInstantiationFunction:
   case Kind::CanonicalPrespecializedGenericTypeCachingOnceToken:
-    return SILLinkage::Private;
+    return AbstractLinkInfo::getPrivate();
 
-  case Kind::DynamicallyReplaceableFunctionKey:
-    return getSILFunction()->getLinkage();
+  case Kind::DynamicallyReplaceableFunctionKey: {
+    auto fn = getSILFunction();
+    return AbstractLinkInfo::get(fn->getLinkage(),
+                                 fn->getParentModule());
+  }
 
-  case Kind::SILFunction:
-    return getSILFunction()->getEffectiveSymbolLinkage();
+  case Kind::SILFunction: {
+    auto fn = getSILFunction();
+    return AbstractLinkInfo::get(fn->getEffectiveSymbolLinkage(),
+                                 fn->getParentModule());
+  }
 
   case Kind::AsyncFunctionPointerAST:
   case Kind::DistributedThunkAsyncFunctionPointer:
-    return getSILLinkage(getDeclLinkage(getDecl()), forDefinition);
+    return AbstractLinkInfo::forDeclDefinedEntity(getDecl(), forDefinition);
 
   case Kind::DynamicallyReplaceableFunctionImpl:
   case Kind::DynamicallyReplaceableFunctionKeyAST:
-    return getSILLinkage(getDeclLinkage(getDecl()), forDefinition);
+    return AbstractLinkInfo::forDeclDefinedEntity(getDecl(), forDefinition);
 
-
-  case Kind::DynamicallyReplaceableFunctionVariable:
-    return getSILFunction()->getEffectiveSymbolLinkage();
+  case Kind::DynamicallyReplaceableFunctionVariable: {
+    auto fn = getSILFunction();
+    return AbstractLinkInfo::get(fn->getLinkage(),
+                                fn->getParentModule());
+  }
   case Kind::DynamicallyReplaceableFunctionVariableAST:
-    return getSILLinkage(getDeclLinkage(getDecl()), forDefinition);
+    return AbstractLinkInfo::forDeclDefinedEntity(getDecl(), forDefinition);
 
   case Kind::SILGlobalVariable:
-  case Kind::ReadOnlyGlobalObject:
-    return getSILGlobalVariable()->getLinkage();
+  case Kind::ReadOnlyGlobalObject: {
+    auto var = getSILGlobalVariable();
+    // FIXME: should we preserve a parent module for global variables
+    // the same way we do for functions?
+    DeclContext *dc =
+      (var->getDecl() ? var->getDecl()->getDeclContext() : nullptr);
+    return AbstractLinkInfo::get(var->getLinkage(), dc);
+  }
 
   case Kind::ReflectionBuiltinDescriptor:
   case Kind::ReflectionFieldDescriptor: {
@@ -875,20 +956,18 @@ SILLinkage LinkEntity::getLinkage(ForDefinition_t forDefinition) const {
     // since we may emit them in other TUs in the same module.
     if (auto *nominal = getType().getAnyNominal())
       if (getDeclLinkage(nominal) == FormalLinkage::PublicNonUnique)
-        return SILLinkage::Shared;
-    return SILLinkage::Private;
+        return AbstractLinkInfo::getShared();
+    return AbstractLinkInfo::getPrivate();
   }
-  case Kind::ReflectionAssociatedTypeDescriptor:
-    if (getLinkageAsConformance() == SILLinkage::Shared)
-      return SILLinkage::Shared;
-    return SILLinkage::Private;
-
   case Kind::ModuleDescriptor:
   case Kind::ExtensionDescriptor:
   case Kind::AnonymousDescriptor:
-    return SILLinkage::Shared;
-  case Kind::DifferentiabilityWitness:
-    return getSILDifferentiabilityWitness()->getLinkage();
+    return AbstractLinkInfo::getShared();
+  case Kind::DifferentiabilityWitness: {
+    auto witness = getSILDifferentiabilityWitness();
+    // FIXME: do we need to preserve a module here?
+    return AbstractLinkInfo::get(witness->getLinkage(), /*module*/ nullptr);
+  }
 
   case Kind::AsyncFunctionPointer:
   case Kind::DispatchThunkAsyncFunctionPointer:
@@ -897,17 +976,22 @@ SILLinkage LinkEntity::getLinkage(ForDefinition_t forDefinition) const {
   case Kind::PartialApplyForwarderAsyncFunctionPointer:
   case Kind::DistributedAccessorAsyncPointer:
     return getUnderlyingEntityForAsyncFunctionPointer()
-        .getLinkage(forDefinition);
-  case Kind::KnownAsyncFunctionPointer:
-    return SILLinkage::PublicExternal;
+        .getLinkage(ctx, forDefinition);
+  case Kind::KnownAsyncFunctionPointer: {
+    assert(!forDefinition);
+    // These are all defined in the concurrency library.
+    // FIXME: saying this is the runtime is possibly a lie?
+    return AbstractLinkInfo::forRuntimeEntity(ctx);
+  }
   case Kind::PartialApplyForwarder:
-    return SILLinkage::Private;
+    return AbstractLinkInfo::getPrivate();
   case Kind::DistributedAccessor:
   case Kind::AccessibleFunctionRecord:
-    return SILLinkage::Shared;
+    return AbstractLinkInfo::getShared();
   case Kind::ExtendedExistentialTypeShape:
     return (isExtendedExistentialTypeShapeShared()
-              ? SILLinkage::Shared : SILLinkage::Private);
+              ? AbstractLinkInfo::getShared()
+              : AbstractLinkInfo::getPrivate());
   }
   llvm_unreachable("bad link entity kind");
 }
@@ -1518,7 +1602,7 @@ DeclContext *LinkEntity::getDeclContextForEmission() const {
   case Kind::DynamicallyReplaceableFunctionVariable:
   case Kind::DynamicallyReplaceableFunctionKey:
     return getSILFunction()->getDeclContext();
-  
+
   case Kind::SILGlobalVariable:
   case Kind::ReadOnlyGlobalObject:
     if (auto decl = getSILGlobalVariable()->getDecl())
@@ -1560,7 +1644,6 @@ DeclContext *LinkEntity::getDeclContextForEmission() const {
   case Kind::TypeMetadataDemanglingCacheVariable:
   case Kind::NoncanonicalSpecializedGenericTypeMetadata:
   case Kind::NoncanonicalSpecializedGenericTypeMetadataCacheVariable:
-    assert(isAlwaysSharedLinkage() && "kind should always be shared linkage");
     return nullptr;
 
   // TODO
@@ -1589,23 +1672,4 @@ DeclContext *LinkEntity::getDeclContextForEmission() const {
   }
   }
   llvm_unreachable("invalid decl kind");
-}
-
-bool LinkEntity::isAlwaysSharedLinkage() const {
-  switch (getKind()) {
-  case Kind::ModuleDescriptor:
-  case Kind::ExtensionDescriptor:
-  case Kind::AnonymousDescriptor:
-  case Kind::ObjCClassRef:
-  case Kind::TypeMetadataAccessFunction:
-  case Kind::CanonicalSpecializedGenericTypeMetadataAccessFunction:
-  case Kind::TypeMetadataLazyCacheVariable:
-  case Kind::TypeMetadataDemanglingCacheVariable:
-  case Kind::NoncanonicalSpecializedGenericTypeMetadata:
-  case Kind::NoncanonicalSpecializedGenericTypeMetadataCacheVariable:
-    return true;
-
-  default:
-    return false;
-  }
 }

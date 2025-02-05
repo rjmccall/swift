@@ -2340,8 +2340,9 @@ namespace {
     }
 
     bool isUniqueDescriptor() {
-      switch (LinkEntity::forOpaqueTypeDescriptor(O)
-                .getLinkage(NotForDefinition)) {
+      auto linkInfo = LinkEntity::forOpaqueTypeDescriptor(O)
+                        .getLinkage(IGM.Context, NotForDefinition);
+      switch (linkInfo.getSILLinkage()) {
       case SILLinkage::Public:
       case SILLinkage::PublicExternal:
       case SILLinkage::Package:
@@ -2913,6 +2914,8 @@ llvm::Constant *
 IRGenModule::getAddrOfSharedContextDescriptor(LinkEntity entity,
                                               ConstantInit definition,
                                               llvm::function_ref<void()> emit) {
+  // FIXME: switch this over to getOrCreateLazyGlobalVariable
+
   if (!definition) {
     // Generate the definition if it hasn't been generated yet.
     auto existing = GlobalVars.find(entity);
@@ -2926,8 +2929,7 @@ IRGenModule::getAddrOfSharedContextDescriptor(LinkEntity entity,
       // at runtime.
       auto mangledName = entity.mangleAsString(Context);
       if (auto otherDefinition = Module.getGlobalVariable(mangledName)) {
-        if (!otherDefinition->isDeclaration() ||
-            !entity.isAlwaysSharedLinkage()) {
+        if (!otherDefinition->isDeclaration()) {
           GlobalVars.insert({entity, otherDefinition});
           return otherDefinition;
         }

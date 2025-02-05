@@ -21,6 +21,7 @@
 #include "swift/AST/Types.h"
 #include "swift/IRGen/LinkContext.h"
 #include "swift/IRGen/ValueWitness.h"
+#include "swift/SIL/FormalLinkage.h"
 #include "swift/SIL/SILFunction.h"
 #include "swift/SIL/SILGlobalVariable.h"
 #include "swift/SIL/SILModule.h"
@@ -47,6 +48,70 @@ bool useDllStorage(const llvm::Triple &triple);
 enum class TypeMetadataAddress {
   AddressPoint,
   FullMetadata,
+};
+
+/// The abstract linkage information about an entity: where it's defined
+/// and with what linkage.
+class AbstractLinkInfo {
+private:
+  SILLinkage Linkage;
+  DeclContext *DefiningDC;
+
+  AbstractLinkInfo(SILLinkage linkage, DeclContext *definingDC)
+    : Linkage(linkage), DefiningDC(definingDC) {}
+
+public:
+  /// Return abstract linkage with the given primitive information.
+  static AbstractLinkInfo get(SILLinkage linkage,
+                              DeclContext *definingDC) {
+    return { linkage, definingDC };
+  }
+
+  /// Turn the given formal linkage into a SIL linkage.
+  static AbstractLinkInfo get(FormalLinkage linkage,
+                              DeclContext *definingDC,
+                              ForDefinition_t forDefinition);
+
+  /// Return abstract linkage for an entity with shared linkage.
+  static AbstractLinkInfo getShared() {
+    // We don't need to store a defining DC in this case.
+    return get(SILLinkage::Shared, nullptr);
+  }
+
+  /// Return abstract linkage for an entity with private linkage.
+  static AbstractLinkInfo getPrivate() {
+    // We don't need to store a defining DC in this case.
+    return get(SILLinkage::Shared, nullptr);
+  }
+
+  /// Return abstract linkage for an entity that is uniquely emitted
+  /// with the given declaration.
+  static AbstractLinkInfo forDeclDefinedEntity(const ValueDecl *decl,
+                                               ForDefinition_t forDefinition);
+
+  /// Return abstract linkage for an entity that is uniquely emitted
+  /// with the given declaration.
+  static AbstractLinkInfo forConformanceDefinedEntity(
+            const ProtocolConformance *conformance,
+            ForDefinition_t forDefinition);
+
+  /// Return abstract linkage for an entity that is defined in the
+  /// language runtime.
+  static AbstractLinkInfo forRuntimeEntity(const ASTContext &ctx);
+
+  /// Return abstract linkage for a fake entity that just needs
+  /// to be created as an IR declaration.
+  static AbstractLinkInfo forPrototypeDeclaration() {
+    return get(SILLinkage::HiddenExternal, nullptr);
+  }
+
+  SILLinkage getSILLinkage() const {
+    return Linkage;
+  }
+
+  /// Is this entity known to be defined within the module being
+  /// defined by the given link context?
+  bool isKnownLocal(const LinkContext &ctx) const;
 };
 
 inline bool isEmbedded(CanType t) {
@@ -1421,7 +1486,8 @@ public:
   std::string mangleAsString(ASTContext &Ctx) const;
 
   SILDeclRef getSILDeclRef() const;
-  SILLinkage getLinkage(ForDefinition_t isDefinition) const;
+  AbstractLinkInfo getLinkage(ASTContext &ctx,
+                              ForDefinition_t isDefinition) const;
 
   bool hasDecl() const {
     return isDeclKind(getKind());
@@ -1628,7 +1694,6 @@ public:
   /// Determine whether entity that represents a symbol is in DATA segment.
   bool isData() const { return !isText(); }
 
-  bool isAlwaysSharedLinkage() const;
 #undef LINKENTITY_GET_FIELD
 #undef LINKENTITY_SET_FIELD
 
