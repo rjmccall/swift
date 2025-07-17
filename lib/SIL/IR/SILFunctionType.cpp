@@ -1239,6 +1239,17 @@ CanSILFunctionType SILFunctionType::getWithExtInfo(ExtInfo newExt) {
 
 namespace {
 
+class ParameterIndex {
+  unsigned Value;
+  enum : unsigned { Self = ~0U };
+public:
+  ParameterIndex(unsigned index) : Value(index) {}
+  static ParameterIndex self() { return Self; }
+
+  bool isSelf() const { return Value == Self; }
+  unsigned get() const { assert(!isSelf()); return Value; }
+};
+
 enum class ConventionsKind : uint8_t {
   Default = 0,
   DefaultBlock = 1,
@@ -1263,33 +1274,24 @@ public:
   ConventionsKind getKind() const { return kind; }
 
   virtual ParameterConvention
-  getIndirectParameter(unsigned index,
-                       const AbstractionPattern &type,
-                       const TypeLowering &substTL) const = 0;
+  getDirectParameter(ValueOwnership ownership, ParameterTypeFlags flags,
+                     ParameterIndex index, const AbstractionPattern &type,
+                     const TypeLowering &substTL) const;
   virtual ParameterConvention
-  getDirectParameter(unsigned index,
-                     const AbstractionPattern &type,
-                     const TypeLowering &substTL) const = 0;
+  getIndirectParameter(ValueOwnership ownership, ParameterTypeFlags flags,
+                       ParameterIndex index, const AbstractionPattern &type,
+                       const TypeLowering &substTL) const;
   virtual ParameterConvention getCallee() const = 0;
   virtual ResultConvention getResult(const TypeLowering &resultTL) const = 0;
-  virtual ParameterConvention
-  getIndirectSelfParameter(const AbstractionPattern &type) const = 0;
-  virtual ParameterConvention
-  getDirectSelfParameter(const AbstractionPattern &type) const = 0;
   virtual ParameterConvention getPackParameter(unsigned index) const = 0;
 
-  // Helpers that branch based on a value ownership.
-  ParameterConvention getIndirect(ValueOwnership ownership, bool forSelf,
-                                  unsigned index,
-                                  const AbstractionPattern &type,
-                                  const TypeLowering &substTL) const {
+  ParameterConvention
+  getIndirectParameterFromOwnership(ValueOwnership ownership) {
     switch (ownership) {
     case ValueOwnership::Default:
-      if (forSelf)
-        return getIndirectSelfParameter(type);
-      return getIndirectParameter(index, type, substTL);
+      llvm_unreachable("should have been filtered out earlier");
     case ValueOwnership::InOut:
-      return ParameterConvention::Indirect_Inout;
+      llvm_unreachable("should have been filtered out earlier");
     case ValueOwnership::Shared:
       return ParameterConvention::Indirect_In_Guaranteed;
     case ValueOwnership::Owned:
@@ -1297,6 +1299,21 @@ public:
           kind == ConventionsKind::CFunctionType)
         return getIndirectParameter(index, type, substTL);
       return ParameterConvention::Indirect_In;
+    }
+    llvm_unreachable("unhandled ownership");
+  }
+
+  ParameterConvention
+  getDirectParameterFromOwnership(ValueOwnership ownership) {
+    switch (ownership) {
+    case ValueOwnership::Default:
+      llvm_unreachable("should have been filtered out earlier");
+    case ValueOwnership::InOut:
+      llvm_unreachable("should have been filtered out earlier");
+    case ValueOwnership::Shared:
+      return ParameterConvention::Direct_Guaranteed;
+    case ValueOwnership::Owned:
+      return ParameterConvention::Direct_Owned;
     }
     llvm_unreachable("unhandled ownership");
   }
@@ -1312,34 +1329,6 @@ public:
       return ParameterConvention::Pack_Guaranteed;
     case ValueOwnership::Owned:
       return ParameterConvention::Pack_Owned;
-    }
-    llvm_unreachable("unhandled ownership");
-  }
-
-  ParameterConvention getDirect(ValueOwnership ownership, bool forSelf,
-                                unsigned index, const AbstractionPattern &type,
-                                const TypeLowering &substTL) const {
-    switch (ownership) {
-    case ValueOwnership::Default: {
-      if (forSelf)
-        return getDirectSelfParameter(type);
-      auto convention = getDirectParameter(index, type, substTL);
-      // Nonescaping closures can only be borrowed across calls currently.
-      if (convention == ParameterConvention::Direct_Owned) {
-        if (auto fnTy = substTL.getLoweredType().getAs<SILFunctionType>()) {
-          if (fnTy->isTrivialNoEscape()) {
-            return ParameterConvention::Direct_Guaranteed;
-          }
-        }
-      }
-      return convention;
-    }
-    case ValueOwnership::InOut:
-      return ParameterConvention::Indirect_Inout;
-    case ValueOwnership::Shared:
-      return ParameterConvention::Direct_Guaranteed;
-    case ValueOwnership::Owned:
-      return ParameterConvention::Direct_Owned;
     }
     llvm_unreachable("unhandled ownership");
   }
@@ -1878,7 +1867,9 @@ private:
       return;
     }
 
-    unsigned origParamIndex = NextOrigParamIndex++;
+    unsigned _origParamIndex = NextOrigParamIndex++;
+    ParameterIndex origParamIndex =
+      (forSelf ? ParameterIndex::self() : _origParamIndex);
     
     auto &substTLConv = TC.getTypeLowering(origType, substType,
                                        TypeExpansionContext::minimal());
@@ -1886,22 +1877,42 @@ private:
 
     CanType loweredType = substTL.getLoweredType().getASTType();
 
+    // Compute the convention. We handle some cases out here because their
+    // types must be passed using specific conventions, so there's no
+    // point in adding complexity to the conventions implementations.
     ParameterConvention convention;
+
+    // inout parameters always have to use the inout convention.
     if (ownership == ValueOwnership::InOut) {
       convention = ParameterConvention::Indirect_Inout;
+
+    // Ask the conventions about an indirect parameter if we have one.
     } else if (isFormallyPassedIndirectly(origType, substType, substTLConv)) {
-      convention = Convs.getIndirect(ownership, forSelf, origParamIndex,
-                                     origType, substTLConv);
+      convention = Convs.getIndirectParameter(ownership, origFlags,
+                                              origParamIndex,
+                                              origType, substTLConv);
       assert(isIndirectFormalParameter(convention));
+
+    // Trivial types must be unowned.
+    // We also force foreign reference types to be passed this way,
+    // although this doesn't seem like the right place to do this.
     } else if (substTL.isTrivial() ||
                // Foreign reference types are passed trivially.
                (substType->getClassOrBoundGenericClass() &&
                 substType->isForeignReferenceType())) {
       convention = ParameterConvention::Direct_Unowned;
+
+    // Non-escaping closures are not considered non-trivial types right now,
+    // but they can only be borrowed across calls currently.
+    } else if (auto fnTy = substTLConv.getLoweredType().getAs<SILFunctionType>();
+               fnTy && fnTy->isTrivialNoEscape()) {
+      return ParameterConvention::Direct_Guaranteed;
+
+    // Otherwise, ask the conventions about a direct parameter.
     } else {
-      // If we are no implicit copy, our ownership is always Owned.
-      convention = Convs.getDirect(ownership, forSelf, origParamIndex, origType,
-                                   substTLConv);
+      convention = Convs.getDirectParameter(ownership, origFlags,
+                                            origParamIndex,
+                                            origType, substTLConv);
       assert(!isIndirectFormalParameter(convention));
     }
 
@@ -2964,16 +2975,20 @@ namespace {
 struct DeallocatorConventions : Conventions {
   DeallocatorConventions() : Conventions(ConventionsKind::Deallocator) {}
 
-  ParameterConvention getIndirectParameter(unsigned index,
-                             const AbstractionPattern &type,
-                             const TypeLowering &substTL) const override {
-    llvm_unreachable("Deallocators do not have indirect parameters");
+  ParameterConvention
+  getIndirectParameter(ValueOwnership ownership, ParameterTypeFlags flags,
+                       ParameterIndex index, const AbstractionPattern &type,
+                       const TypeLowering &substTL) const override {
+    assert(index.isSelf() && "deallocators don't take other parameters than self");
+    return ParameterConvention::Indirect_In;
   }
 
-  ParameterConvention getDirectParameter(unsigned index,
-                             const AbstractionPattern &type,
-                             const TypeLowering &substTL) const override {
-    llvm_unreachable("Deallocators do not have non-self direct parameters");
+  ParameterConvention
+  getDirectParameter(ValueOwnership ownership, ParameterTypeFlags flags,
+                     ParameterIndex index, const AbstractionPattern &type,
+                     const TypeLowering &substTL) const override {
+    assert(index.isSelf() && "deallocators don't take other parameters than self");
+    return ParameterConvention::Direct_Owned;
   }
 
   ParameterConvention getCallee() const override {
@@ -2987,17 +3002,6 @@ struct DeallocatorConventions : Conventions {
   ResultConvention getResult(const TypeLowering &tl) const override {
     // TODO: Put an unreachable here?
     return ResultConvention::Owned;
-  }
-
-  ParameterConvention
-  getDirectSelfParameter(const AbstractionPattern &type) const override {
-    // TODO: Investigate whether or not it is
-    return ParameterConvention::Direct_Owned;
-  }
-
-  ParameterConvention
-  getIndirectSelfParameter(const AbstractionPattern &type) const override {
-    return ParameterConvention::Indirect_In;
   }
 
   static bool classof(const Conventions *C) {
@@ -3032,21 +3036,35 @@ public:
     return normalParameterConvention == NormalParameterConvention::Guaranteed;
   }
 
-  ParameterConvention getIndirectParameter(unsigned index,
-                            const AbstractionPattern &type,
-                            const TypeLowering &substTL) const override {
+  ParameterConvention
+  getIndirectParameter(ValueOwnership ownership, ParameterTypeFlags flags,
+                       ParameterIndex index, const AbstractionPattern &type,
+                       const TypeLowering &substTL) const override {
+    if (ownership != ValueOwnership::Default) {
+      return getIndirectParameterFromOwnership(ownership);
+    }
+    if (index.isSelf()) {
+      return ParameterConvention::Indirect_In_Guaranteed;
+    }
     if (isNormalParameterConventionGuaranteed()) {
       return ParameterConvention::Indirect_In_Guaranteed;
     }
     return ParameterConvention::Indirect_In;
   }
 
-  ParameterConvention getDirectParameter(unsigned index,
-                            const AbstractionPattern &type,
-                            const TypeLowering &substTL) const override {
-    if (isNormalParameterConventionGuaranteed())
-      return ParameterConvention::Direct_Guaranteed;
-    return ParameterConvention::Direct_Owned;
+  ParameterConvention
+  getDirectParameter(ValueOwnership ownership, ParameterTypeFlags flags,
+                     ParameterIndex index, const AbstractionPattern &type,
+                     const TypeLowering &substTL) const override {
+    if (ownership == ValueOwnership::Default) {
+      if (isSelf)
+        return ParameterConvention::Direct_Guaranteed;
+      if (isNormalParameterConventionGuaranteed())
+        return ParameterConvention::Direct_Guaranteed;
+      return ParameterConvention::Direct_Owned;
+    } else {
+      return getDirectParameterFromOwnership(ownership);
+    }
   }
 
   ParameterConvention getPackParameter(unsigned index) const override {
@@ -3061,16 +3079,6 @@ public:
 
   ResultConvention getResult(const TypeLowering &tl) const override {
     return resultConvention;
-  }
-
-  ParameterConvention
-  getDirectSelfParameter(const AbstractionPattern &type) const override {
-    return ParameterConvention::Direct_Guaranteed;
-  }
-
-  ParameterConvention
-  getIndirectSelfParameter(const AbstractionPattern &type) const override {
-    return ParameterConvention::Indirect_In_Guaranteed;
   }
 
   static bool classof(const Conventions *C) {
@@ -3096,10 +3104,15 @@ struct DefaultInitializerConventions : DefaultConventions {
   /// Initializers must take 'self' at +1, since they will return it back at +1,
   /// and may chain onto Objective-C initializers that replace the instance.
   ParameterConvention
-  getDirectSelfParameter(const AbstractionPattern &type) const override {
-    return ParameterConvention::Direct_Owned;
+  getDirectParameter(ValueOwnership ownership, ParameterTypeFlags flags,
+                     ParameterIndex index, const AbstractionPattern &type,
+                     const TypeLowering &substTL) const override {
+    if (isSelf)
+      return ParameterConvention::Direct_Owned;
+    return DefaultConventions::getDirectParameter(ownership, flags, index,
+                                                  type, substTL);
   }
-  
+
   ParameterConvention
   getIndirectSelfParameter(const AbstractionPattern &type) const override {
     return ParameterConvention::Indirect_In;
@@ -3111,11 +3124,6 @@ struct DefaultInitializerConventions : DefaultConventions {
 struct DefaultAllocatorConventions : DefaultConventions {
   DefaultAllocatorConventions()
       : DefaultConventions(NormalParameterConvention::Owned) {}
-
-  ParameterConvention
-  getDirectSelfParameter(const AbstractionPattern &type) const override {
-    llvm_unreachable("Allocating inits do not have self parameters");
-  }
 
   ParameterConvention
   getIndirectSelfParameter(const AbstractionPattern &type) const override {
@@ -3138,15 +3146,20 @@ struct DefaultSetterConventions : DefaultConventions {
 struct DefaultBlockConventions : Conventions {
   DefaultBlockConventions() : Conventions(ConventionsKind::DefaultBlock) {}
 
-  ParameterConvention getIndirectParameter(unsigned index,
-                            const AbstractionPattern &type,
-                            const TypeLowering &substTL) const override {
+  ParameterConvention
+  getIndirectParameter(ValueOwnership ownership, ParameterTypeFlags flags,
+                       ParameterIndex index, const AbstractionPattern &type,
+                       const TypeLowering &substTL) const override {
     llvm_unreachable("indirect block parameters unsupported");
   }
 
-  ParameterConvention getDirectParameter(unsigned index,
-                            const AbstractionPattern &type,
-                            const TypeLowering &substTL) const override {
+  ParameterConvention
+  getDirectParameter(ValueOwnership ownership, ParameterTypeFlags flags,
+                     ParameterIndex index, const AbstractionPattern &type,
+                     const TypeLowering &substTL) const override {
+    assert(!forSelf && "blocks don't have self parameters");
+    if (ownership != ValueOwnership::Default)
+      return getDirectParameterFromOwnership(ownership);
     return ParameterConvention::Direct_Unowned;
   }
 
@@ -3160,16 +3173,6 @@ struct DefaultBlockConventions : Conventions {
 
   ResultConvention getResult(const TypeLowering &substTL) const override {
     return ResultConvention::Autoreleased;
-  }
-
-  ParameterConvention
-  getDirectSelfParameter(const AbstractionPattern &type) const override {
-    llvm_unreachable("objc blocks do not have a self parameter");
-  }
-
-  ParameterConvention
-  getIndirectSelfParameter(const AbstractionPattern &type) const override {
-    llvm_unreachable("objc blocks do not have a self parameter");
   }
 
   static bool classof(const Conventions *C) {
@@ -3581,16 +3584,29 @@ public:
   ObjCMethodConventions(const clang::ObjCMethodDecl *method)
     : Conventions(ConventionsKind::ObjCMethod), Method(method) {}
 
-  ParameterConvention getIndirectParameter(unsigned index,
-                           const AbstractionPattern &type,
-                           const TypeLowering &substTL) const override {
-    return getIndirectCParameterConvention(Method->param_begin()[index]);
+  ParameterConvention
+  getIndirectParameter(ValueOwnership ownership, ParameterTypeFlags flags,
+                       ParameterIndex index, const AbstractionPattern &type,
+                       const TypeLowering &substTL) const override {
+    assert(!index.isSelf() &&
+           "objc methods do not support indirect self parameters");
+    return getIndirectCParameterConvention(Method->param_begin()[index.get()]);
   }
 
-  ParameterConvention getDirectParameter(unsigned index,
-                           const AbstractionPattern &type,
-                           const TypeLowering &substTL) const override {
-    return getDirectCParameterConvention(Method->param_begin()[index]);
+  ParameterConvention
+  getDirectParameter(ValueOwnership ownership, ParameterTypeFlags flags,
+                     ParameterIndex index, const AbstractionPattern &type,
+                     const TypeLowering &substTL) const override {
+    if (index.isSelf()) {
+      if (Method->hasAttr<clang::NSConsumesSelfAttr>())
+        return ParameterConvention::Direct_Owned;
+
+      // The caller is supposed to take responsibility for ensuring
+      // that 'self' survives a method call.
+      return ObjCSelfConvention;
+    }
+
+    return getDirectCParameterConvention(Method->param_begin()[index.get()]);
   }
 
   ParameterConvention getPackParameter(unsigned index) const override {
@@ -3704,21 +3720,6 @@ public:
     return ResultConvention::Autoreleased;
   }
 
-  ParameterConvention
-  getDirectSelfParameter(const AbstractionPattern &type) const override {
-    if (Method->hasAttr<clang::NSConsumesSelfAttr>())
-      return ParameterConvention::Direct_Owned;
-
-    // The caller is supposed to take responsibility for ensuring
-    // that 'self' survives a method call.
-    return ObjCSelfConvention;
-  }
-
-  ParameterConvention
-  getIndirectSelfParameter(const AbstractionPattern &type) const override {
-    llvm_unreachable("objc methods do not support indirect self parameters");
-  }
-
   static bool classof(const Conventions *C) {
     return C->getKind() == ConventionsKind::ObjCMethod;
   }
@@ -3743,9 +3744,11 @@ public:
   CFunctionTypeConventions(const clang::FunctionType *type)
     : Conventions(ConventionsKind::CFunctionType), FnType(type) {}
 
-  ParameterConvention getIndirectParameter(unsigned index,
-                            const AbstractionPattern &type,
-                           const TypeLowering &substTL) const override {
+  ParameterConvention
+  getIndirectParameter(ValueOwnership ownership, ParameterTypeFlags flags,
+                       ParameterIndex index, const AbstractionPattern &type,
+                       const TypeLowering &substTL) const override {
+    assert(!index.isSelf() && "c function types do not have a self parameter");
     if (type.isClangType()) {
       if (type.getClangType()
               ->getUnqualifiedDesugaredType()
@@ -3766,13 +3769,18 @@ public:
       if (silTy.isSensitive())
         return ParameterConvention::Indirect_In_Guaranteed;
     }
-    return getIndirectCParameterConvention(getParamType(index));
+    return getIndirectCParameterConvention(getParamType(index.get()));
   }
 
-  ParameterConvention getDirectParameter(unsigned index,
-                            const AbstractionPattern &type,
-                           const TypeLowering &substTL) const override {
-    if (cast<clang::FunctionProtoType>(FnType)->isParamConsumed(index))
+  if (Method->hasAttr<clang::NSConsumesSelfAttr>())
+    return ParameterConvention::Direct_Owned;
+
+  ParameterConvention
+  getDirectParameter(ValueOwnership ownership, ParameterTypeFlags flags,
+                     ParameterIndex index, const AbstractionPattern &type,
+                     const TypeLowering &substTL) const override {
+    assert(!index.isSelf() && "C function types do not have a self parameter");
+    if (cast<clang::FunctionProtoType>(FnType)->isParamConsumed(index.get()))
       return ParameterConvention::Direct_Owned;
     return getDirectCParameterConvention(getParamType(index));
   }
@@ -3802,16 +3810,6 @@ public:
     return ResultConvention::Autoreleased;
   }
 
-  ParameterConvention
-  getDirectSelfParameter(const AbstractionPattern &type) const override {
-    llvm_unreachable("c function types do not have a self parameter");
-  }
-
-  ParameterConvention
-  getIndirectSelfParameter(const AbstractionPattern &type) const override {
-    llvm_unreachable("c function types do not have a self parameter");
-  }
-
   static bool classof(const Conventions *C) {
     return C->getKind() == ConventionsKind::CFunctionType;
   }
@@ -3827,13 +3825,15 @@ public:
                                decl->getType()->castAs<clang::FunctionType>()),
       TheDecl(decl) {}
 
-  ParameterConvention getDirectParameter(unsigned index,
-                            const AbstractionPattern &type,
-                            const TypeLowering &substTL) const override {
-    if (auto param = TheDecl->getParamDecl(index))
+  ParameterConvention
+  getDirectParameter(ValueOwnership ownership, ParameterTypeFlags flags,
+                     ParameterIndex index, const AbstractionPattern &type,
+                     const TypeLowering &substTL) const override {
+    assert(!index.isSelf() && "C function types do not have a self parameter");
+    if (auto param = TheDecl->getParamDecl(index.get()))
       if (param->hasAttr<clang::CFConsumedAttr>())
         return ParameterConvention::Direct_Owned;
-    return super::getDirectParameter(index, type, substTL);
+    return super::getDirectParameter(ownership, flags, index, type, substTL);
   }
 
   ParameterConvention getPackParameter(unsigned index) const override {
@@ -3894,21 +3894,23 @@ public:
             ConventionsKind::CXXMethod,
             decl->getType()->castAs<clang::FunctionType>()),
         TheDecl(decl), isMutating(isMutating) {}
+
   ParameterConvention
-  getIndirectSelfParameter(const AbstractionPattern &type) const override {
+  getIndirectSelfParameter(const AbstractionPattern &type) const {
     if (isMutating)
       return ParameterConvention::Indirect_Inout;
     return ParameterConvention::Indirect_In_Guaranteed;
   }
 
   ParameterConvention
-  getIndirectParameter(unsigned int index, const AbstractionPattern &type,
+  getIndirectParameter(ValueOwnership ownership, ParameterTypeFlags flags,
+                       ParameterIndex index, const AbstractionPattern &type,
                        const TypeLowering &substTL) const override {
     // `self` is the last parameter.
-    if (index == TheDecl->getNumParams()) {
+    if (index.isSelf() || index == TheDecl->getNumParams()) {
       return getIndirectSelfParameter(type);
     }
-    return super::getIndirectParameter(index, type, substTL);
+    return super::getIndirectParameter(ownership, flags, index, type, substTL);
   }
   ResultConvention getResult(const TypeLowering &resultTL) const override {
     if (isa<clang::CXXConstructorDecl>(TheDecl)) {
@@ -4133,15 +4135,23 @@ public:
       : Conventions(ConventionsKind::ObjCSelectorFamily), Family(family),
         pseudogeneric(pseudogeneric) {}
 
-  ParameterConvention getIndirectParameter(unsigned index,
-                                           const AbstractionPattern &type,
-                                 const TypeLowering &substTL) const override {
+  ParameterConvention
+  getIndirectParameter(ValueOwnership ownership, ParameterTypeFlags flags,
+                       ParameterIndex index, const AbstractionPattern &type,
+                       const TypeLowering &substTL) const override {
     return ParameterConvention::Indirect_In;
   }
 
-  ParameterConvention getDirectParameter(unsigned index,
-                                         const AbstractionPattern &type,
-                                 const TypeLowering &substTL) const override {
+  ParameterConvention
+  getDirectParameter(ValueOwnership ownership, ParameterTypeFlags flags,
+                     ParameterIndex index, const AbstractionPattern &type,
+                     const TypeLowering &substTL) const override {
+    if (index.isSelf()) {
+      if (Family == ObjCSelectorFamily::Init)
+        return ParameterConvention::Direct_Owned;
+      return ObjCSelfConvention;
+    }
+
     return ParameterConvention::Direct_Unowned;
   }
 
@@ -4177,13 +4187,6 @@ public:
       return ResultConvention::Autoreleased;
 
     return ResultConvention::Unowned;
-  }
-
-  ParameterConvention
-  getDirectSelfParameter(const AbstractionPattern &type) const override {
-    if (Family == ObjCSelectorFamily::Init)
-      return ParameterConvention::Direct_Owned;
-    return ObjCSelfConvention;
   }
 
   ParameterConvention

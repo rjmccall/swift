@@ -46,4 +46,11 @@ void sendUserDefinedIntoGlobalFunction(
 void sendingWithCompletionHandler(void (^completion)(SWIFT_SENDING NonSendableCStruct arg));
 SWIFT_SENDING NonSendableCStruct sendingWithLazyReturn(SWIFT_SENDING NonSendableCStruct (^makeLazily)(void));
 
+@protocol MyProto <NSObject>
+- (NSObject *)produce SWIFT_SENDING;
+- (void)receive: (NSObject *)NS_SWIFT_SENDING other;
+@optional
+- (void)optionalReceive: (NSObject *)NS_SWIFT_SENDING other;
+@end
+
 #pragma clang assume_nonnull end

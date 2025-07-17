@@ -8239,6 +8239,12 @@ public:
   /// declaration, given that it is @objc and 'async'.
   std::optional<ForeignAsyncConvention> getForeignAsyncConvention() const;
 
+  /// Set the witnessed ObjC requirement.
+  void setWitnessedObjCRequirement(AbstractFunctionDecl *req);
+
+  /// Get the witnessed ObjC requirement if we have one.
+  AbstractFunctionDecl *getWitnessedObjCRequirement() const;
+
   /// Whether the given DeclKind is for an AbstractFunctionDecl.
   static bool isKind(DeclKind kind) {
     return kind >= DeclKind::First_AbstractFunctionDecl &&

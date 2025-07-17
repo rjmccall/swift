@@ -2118,7 +2118,10 @@ void markAsObjC(ValueDecl *D, ObjCReason reason,
     AbstractFunctionDecl *declProvidingInheritedAsyncConvention = nullptr;
     std::optional<ForeignErrorConvention> inheritedErrorConvention;
     AbstractFunctionDecl *declProvidingInheritedErrorConvention = nullptr;
+    AbstractFunctionDecl *declProvidingConventions = nullptr;
     if (auto baseMethod = method->getOverriddenDecl()) {
+      declProvidingConventions = baseMethod;
+
       // If the overridden method has a foreign async or error convention,
       // adopt it. Note that the foreign async or error convention affects the
       // selector, so we perform this before inferring a selector.
@@ -2142,6 +2145,11 @@ void markAsObjC(ValueDecl *D, ObjCReason reason,
     for (auto req : findWitnessedObjCRequirements(method)) {
       auto reqMethod = dyn_cast<AbstractFunctionDecl>(req);
       if (!reqMethod) continue;
+
+      if (!declProvidingConventions) {
+        declProvidingConventions = req;
+        method->setWitnessedObjCRequirement(req);
+      }
 
       // If the method witnesses an ObjC requirement that is async, adopt its
       // async convention.
@@ -2186,6 +2194,9 @@ void markAsObjC(ValueDecl *D, ObjCReason reason,
           declProvidingInheritedErrorConvention = reqMethod;
         }
       }
+
+      // FIXME: recognize any other fatal calling convention mismatches with
+      // declProvidingConventions.
     }
 
     // Attach the foreign async convention.
