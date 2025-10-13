@@ -357,44 +357,6 @@ static void emitPendingDeallocations(State &state,
   }
 }
 
-//#ifndef NDEBUG
-static void checkPreconditions(SILFunction *F) {
-  // StackNesting has two preconditions: first, dominance still has
-  // to hold among allocations and deallocations; and second,
-  // allocations must be jointly post-dominated by their deallocations.
-  //
-  // Dominance is the more important precondition to check, because we
-  // don't want this pass to be held responsible if it ends up
-  // generating non-dominating loads and stores because its input didn't
-  // obey dominance either.
-  //
-  // Joint post-dominance is likely to just result in join
-  // If the input just violates joint post-dominance, on the other
-  // hand, we generally maintain most of that structure, and it's
-  // relatively easy to debug.
-
-  DominanceInfo dominance(F);
-
-  for (auto &BB: *F) {
-    for (auto &I : BB) {
-      if (I.isDeallocatingStack()) {
-        SILInstruction *dealloc = &I;
-        SILInstruction *alloc = getAllocForDealloc(dealloc);
-        if (!dominance.properlyDominates(alloc, dealloc)) {
-          llvm::errs() << "FATAL ERROR: prior to StackNesting, deallocation\n  "
-                       << *dealloc
-                       << "is not properly dominated by its allocation\n  "
-                       << *alloc
-                       << "Complete function:\n" << *F;
-          abort();
-        }
-      }
-    }
-  }
-
-}
-//#endif
-
 /// The main entrypoint for clients.
 ///
 /// We use a straightforward, single-pass algorithm:
@@ -527,13 +489,33 @@ static void checkPreconditions(SILFunction *F) {
 ///   The algorithm preserves the joint post-dominance of
 ///   allocations and deallocations.
 /// 
-/// Proof: Prior to the algorithm running, each allocation is jointly
+/// Proof: The algorithm performs a DFS, which means that it implicitly
+/// picks an arbitrary spanning tree of the reachable blocks of the
+/// function. As it explores this tree, whenever it encounters a
+/// deallocation, it either keeps the deallocation in place or removes
+/// it and adds the allocation to the pending set. If the allocation is
+/// added to the pending set, then along each path the algorithm explores
+/// that includes the block containing the removed deallocation, a
+/// deallocation is inserted following the deallocation of at most one
+/// other allocation.
+
+
+
+
+Prior to the algorithm running, each allocation is jointly
 /// post-dominated by its deallocations. This means that every simple
 /// path from the allocation must pass through at most one of its
 /// deallocations, and there must be a deallocation if the path reaches
 /// the exit.
 ///
-/// Given an allocation A, consider its set of deallocations.
+///
+/// Given an allocation A, consider its set of deallocations. For
+/// each deallocation, the algorithm either keeps the deallocation or
+/// puts the allocation in the pending set as it continues its
+/// search. For each path explored by the DFS from this point, the
+/// algorithm will insert 
+
+/// algorithm either preserves 
 /// Replacing any of these deallocations with a set of deallocations
 /// that jointly post-dominate the original deallocation point
 /// preserves the joint post-dominance of the original allocation.
@@ -594,10 +576,6 @@ static void checkPreconditions(SILFunction *F) {
       // will re-establish the joint post-dominance of `alloc` by its
       // deallocations with respect to this path.
 StackNesting::Changes StackNesting::fixNesting(SILFunction *F) {
-//#ifndef NDEBUG
-  checkPreconditions(F);
-//#endif
-
   bool madeChanges = false;
 
   // The index in the allocation stack for each allocation.
